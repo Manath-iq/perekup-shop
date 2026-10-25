@@ -6,6 +6,8 @@ export interface MediaItem {
   id: number;
   kind: 'photo' | 'video';
   url: string;
+  /** Кадр-превью видео */
+  poster: string | null;
   width: number | null;
   height: number | null;
   position: number;
@@ -52,6 +54,8 @@ export interface Listing extends LegacyListingFields {
   post_url: string;
   created_at: number;
   cover: string | null;
+  /** Крошечное превью обложки (data: URI) — размытая подложка, пока грузится картинка */
+  cover_blur: string | null;
   media?: MediaItem[];
 }
 

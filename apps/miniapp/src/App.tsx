@@ -112,7 +112,7 @@ export function App() {
       ({ url, text } = await api.buy(l.id));
     } catch {
       // вне Telegram заявка не уходит, но чат продавца откроем
-      text = `Здравствуйте! Хочу iPhone ${l.family} за ${l.price_rub} ₽ (пост ${l.channel_msg_id})`;
+      text = `Здравствуйте! Хочу ${l.title} за ${l.price_rub} ₽ (пост ${l.channel_msg_id})`;
       url = `https://t.me/${store?.seller ?? 'manath'}?text=${encodeURIComponent(text)}`;
     }
     // не все клиенты подставляют ?text= — страхуемся буфером обмена

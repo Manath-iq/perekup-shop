@@ -5,6 +5,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
+  // Workers Caching только перед медиа: API и бот динамические, их точка входа не кэшируется
+  "cache": { "enabled": false },
+  "exports": {
+    "default": { "type": "worker", "cache": { "enabled": false } },
+    "CachedMedia": { "type": "worker", "cache": { "enabled": true } }
+  },
   "assets": {
     "directory": "../miniapp/dist",
     "binding": "ASSETS",

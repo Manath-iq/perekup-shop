@@ -9,6 +9,7 @@ export function Card({ l, onOpen, index }: { l: Listing; onOpen: (l: Listing) =>
   return (
     <button class="card" style={{ '--i': Math.min(index, 8) }} onClick={() => onOpen(l)}>
       <div class="card-photo">
+        {l.cover_blur && <i class="card-blur" style={{ backgroundImage: `url(${l.cover_blur})` }} />}
         {l.cover ? (
           <Img src={l.cover} eager={index < 4} />
         ) : (
@@ -32,7 +33,7 @@ export function Card({ l, onOpen, index }: { l: Listing; onOpen: (l: Listing) =>
         )}
       </div>
       <div class="card-body">
-        <div class="card-title">iPhone {l.family ?? l.model_raw}</div>
+        <div class="card-title">{l.title}</div>
         {meta && <div class="card-meta">{meta}</div>}
         <div class="card-price">
           <span>{l.price_rub ? formatPrice(l.price_rub) : 'Цена по запросу'}</span>

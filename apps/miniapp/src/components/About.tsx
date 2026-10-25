@@ -19,7 +19,7 @@ export function About({ store }: { store: StoreInfo | null }) {
           <span>R</span>
         </div>
         <h1>{store.name}</h1>
-        <p>Б/у iPhone с проверкой. Каждый телефон — с честным описанием и реальными фото.</p>
+        <p>Техника с проверкой. У каждого товара — честное описание и реальные фото.</p>
       </div>
 
       {reviews && (

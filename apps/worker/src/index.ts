@@ -1,4 +1,5 @@
 import { Hono, type Context } from 'hono';
+import { WorkerEntrypoint } from 'cloudflare:workers';
 import { webhookCallback } from 'grammy';
 import { listingTitle, formatPrice } from '@vitrina/core/format';
 import type { StoreConfig } from '@vitrina/core/store';
@@ -7,11 +8,11 @@ import type { Env } from './env';
 import { now } from './env';
 import { verifyInitData, type TgUser } from './auth';
 import { getFacets, getListing, getListingRow, listSubscriptions, logEvent, queryListings, upsertUser } from './db';
-import { serveMedia } from './media';
+import { handleMedia } from './media';
 import { createBot } from './bot';
 import { sendBuyRequest, sendWeeklyStats } from './notify';
 import { checkDeleted, importChannel, importReviews, type ReviewsMeta } from './importer';
-import { downloadPending, purgeSoldMedia, reparse } from './ingest';
+import { downloadCovers, purgeSoldMedia, reparse } from './ingest';
 import { listStores, resolveStore, saveStore, type Ctx, type Store } from './store';
 
 type HonoEnv = { Bindings: Env; Variables: { user: TgUser | null; store: Store } };
@@ -24,8 +25,18 @@ app.post('/bot', (c) => {
   return webhookCallback(bot, 'std/http', { secretToken: c.env.WEBHOOK_SECRET, onTimeout: 'return' })(c.req.raw);
 });
 
-// ——— Медиа ———
-app.get('/media/*', (c) => serveMedia(c.env, decodeURIComponent(c.req.path.slice('/media/'.length)), c.req.raw));
+// ——— Медиа: через кэшируемую точку входа CachedMedia (Workers Caching) ———
+app.get('/media/*', (c) => (c.executionCtx as unknown as { exports: { CachedMedia: Fetcher } }).exports.CachedMedia.fetch(c.req.raw));
+
+/**
+ * Перед этой точкой входа стоит Workers Caching (`exports.CachedMedia.cache` в wrangler.jsonc): повторные запросы
+ * отдаются из кэша без запуска воркера, Range для видео Cloudflare нарезает сам из закэшированного файла.
+ */
+export class CachedMedia extends WorkerEntrypoint<Env> {
+  fetch(req: Request) {
+    return handleMedia(this.env, req);
+  }
+}
 
 // ——— API: подпись initData проверяется на каждом запросе ———
 app.use('/api/*', async (c, next) => {
@@ -162,18 +173,27 @@ const withStore = (fn: (ctx: Ctx, c: AdminCtx) => Promise<unknown>) => async (c:
   return c.json(await fn({ env: c.env, store }, c));
 };
 app.post('/admin/import', withStore((ctx, c) => importChannel(ctx, num(c.req.query('pages')) ?? 3)));
-app.post('/admin/media', withStore((ctx) => downloadPending(ctx, 35)));
+app.post('/admin/media', withStore((ctx) => downloadCovers(ctx, 12)));
 app.post('/admin/reviews', withStore((ctx) => importReviews(ctx)));
 app.post('/admin/check', withStore((ctx) => checkDeleted(ctx)));
 app.post('/admin/purge', withStore((ctx, c) => purgeSoldMedia(ctx, num(c.req.query('days')) ?? 7)));
 app.post('/admin/reparse', withStore((ctx, c) => reparse(ctx, num(c.req.query('offset')) ?? 0, num(c.req.query('limit')) ?? 25)));
 
-/** Часовая работа: удалённые посты, докачка и чистка медиа, старые события */
+/**
+ * Часовая работа: удалённые посты, обложки, чистка KV, старые события.
+ * Бесплатный Workers разрешает 50 внешних подзапросов на вызов: клиенту — 15 проверок и 6 обложек,
+ * демо-деплою — по 3 и 2 на магазин, магазины в случайном порядке, пока хватает бюджета.
+ */
 async function hourly(env: Env) {
-  for (const store of await listStores(env)) {
+  const stores = (await listStores(env)).sort(() => Math.random() - 0.5);
+  let budget = 40;
+  for (const store of stores) {
     const ctx: Ctx = { env, store };
-    await checkDeleted(ctx, env.STORE_ID ? 20 : 5);
-    await downloadPending(ctx, env.STORE_ID ? 20 : 5);
+    const [checks, covers] = env.STORE_ID ? [15, 6] : [3, 2];
+    if (budget < checks + covers * 2) break;
+    budget -= checks + covers * 2;
+    await checkDeleted(ctx, checks);
+    await downloadCovers(ctx, covers);
     await purgeSoldMedia(ctx);
   }
   await env.DB.prepare('DELETE FROM events WHERE created_at < ?').bind(now() - 90 * 86400).run();

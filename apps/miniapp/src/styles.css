@@ -356,6 +356,20 @@ s {
 .slide img.loaded {
   opacity: 1;
 }
+/* размытое превью обложки из 90-пиксельного размера Telegram — видно, пока грузится картинка */
+.card-photo {
+  position: relative;
+}
+.card-photo img {
+  position: relative;
+}
+.card-blur {
+  position: absolute;
+  inset: -8px;
+  background-size: cover;
+  background-position: center;
+  filter: blur(14px) saturate(1.2);
+}
 .card-photo-empty {
   height: 100%;
   display: grid;

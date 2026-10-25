@@ -2,6 +2,7 @@ import { CATEGORIES, type Attrs, type Category } from '@vitrina/core/catalog';
 import type { Facets, Listing, ListingStatus, MediaItem, ModelFacet, Subscription } from '@vitrina/core/types';
 import type { Ctx, Store } from './store';
 import { now } from './env';
+import { TG_FILE_LIMIT } from './media';
 
 export interface ListingRow {
   id: number;
@@ -35,7 +36,7 @@ export interface ListingRow {
 
 export const mediaUrl = (key: string) => `/media/${key}`;
 
-export function toListing(r: ListingRow & { cover_key?: string | null; old_price?: number | null }): Listing {
+export function toListing(r: ListingRow & { cover_key?: string | null; cover_blur?: string | null; old_price?: number | null }): Listing {
   const attrs: Attrs = JSON.parse(r.attrs);
   const old = r.old_price && r.price && r.old_price > r.price ? r.old_price : null;
   return {
@@ -56,6 +57,7 @@ export function toListing(r: ListingRow & { cover_key?: string | null; old_price
     post_url: r.post_url,
     created_at: r.created_at,
     cover: r.cover_key ? mediaUrl(r.cover_key) : null,
+    cover_blur: r.cover_blur ?? null,
     // поля прототипа для текущего мини-аппа
     channel_msg_id: r.msg_id,
     family: r.short,
@@ -84,12 +86,12 @@ export function visibleWhere(store: Store) {
   return `l.store_id = ? AND l.status IN ('active', 'reserved') AND ${confirmed}`;
 }
 
+// обложка — единственная запись медиа карточки, у которой есть ключ KV
 const LISTING_SELECT = `
-  SELECT l.*,
-    (SELECT storage_key FROM media m WHERE m.listing_id = l.id AND m.kind = 'photo'
-       AND m.storage_key IS NOT NULL AND m.storage_key != 'skip' ORDER BY position LIMIT 1) AS cover_key,
+  SELECT l.*, c.storage_key AS cover_key, c.blur AS cover_blur,
     (SELECT price FROM price_history p WHERE p.listing_id = l.id ORDER BY changed_at DESC LIMIT 1) AS old_price
-  FROM listings l`;
+  FROM listings l
+  LEFT JOIN media c ON c.id = (SELECT id FROM media WHERE listing_id = l.id AND storage_key IS NOT NULL AND storage_key != 'skip' LIMIT 1)`;
 
 export interface ListingQuery {
   category?: string;
@@ -136,15 +138,25 @@ export async function getListing({ env, store }: Ctx, id: number): Promise<Listi
   const row = await env.DB.prepare(`${LISTING_SELECT} WHERE l.id = ? AND l.store_id = ?`).bind(id, store.id).first<ListingRow>();
   if (!row) return null;
   const listing = toListing(row);
+  // галерея и видео проксируются из Telegram; видео больше 20 МБ Bot API не отдаёт — оно остаётся в посте
   const { results } = await env.DB.prepare(
-    `SELECT id, kind, storage_key, width, height, position FROM media
-     WHERE listing_id = ? AND storage_key IS NOT NULL AND storage_key != 'skip' ORDER BY position`,
+    `SELECT id, kind, source, poster_source, file_size, width, height, position FROM media WHERE listing_id = ? ORDER BY position, kind`,
   )
     .bind(id)
-    .all<{ id: number; kind: 'photo' | 'video'; storage_key: string; width: number | null; height: number | null; position: number }>();
-  listing.media = results.map(
-    (m): MediaItem => ({ id: m.id, kind: m.kind, url: mediaUrl(m.storage_key), width: m.width, height: m.height, position: m.position }),
-  );
+    .all<{ id: number; kind: 'photo' | 'video'; source: string; poster_source: string | null; file_size: number | null; width: number | null; height: number | null; position: number }>();
+  listing.media = results
+    .filter((m) => !(m.source.startsWith('tg:') && m.file_size && m.file_size > TG_FILE_LIMIT))
+    .map(
+      (m): MediaItem => ({
+        id: m.id,
+        kind: m.kind,
+        url: `/media/i/${m.id}`,
+        poster: m.poster_source ? `/media/i/${m.id}?v=poster` : null,
+        width: m.width,
+        height: m.height,
+        position: m.position,
+      }),
+    );
   return listing;
 }
 

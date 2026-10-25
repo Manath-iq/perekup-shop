@@ -2,7 +2,7 @@ import { parsePost } from '@vitrina/core/parse';
 import { embedHasPost, htmlToText, parseFeed } from '@vitrina/core/scrape';
 import { now } from './env';
 import type { Ctx } from './store';
-import { addMedia, downloadPending, setStatus, upsertPost } from './ingest';
+import { addMedia, downloadCovers, setStatus, upsertPost } from './ingest';
 import type { ListingRow } from './db';
 import { kvMediaStore } from './media';
 
@@ -36,12 +36,12 @@ export async function importChannel(ctx: Ctx, pages = 3) {
       if (r.becameSold) sold++;
       for (const m of p.media) {
         // у импорта альбом — это один пост, группой служит id первого сообщения
-        await addMedia(ctx, { msg_id: m.msg_id, media_group_id: `feed:${p.msg_id}`, kind: m.kind, source: m.url });
+        await addMedia(ctx, { msg_id: m.msg_id, media_group_id: `feed:${p.msg_id}`, kind: m.kind, source: m.url, poster_source: m.thumb ?? null });
       }
     }
     before = Math.min(...posts.map((p) => p.msg_id));
   }
-  const media = await downloadPending(ctx, 35);
+  const media = await downloadCovers(ctx, 10);
   return { seen, imported, sold, media };
 }
 
@@ -49,7 +49,7 @@ export async function importChannel(ctx: Ctx, pages = 3) {
  * Удалённые посты: Bot API их не присылает, поэтому раз в час проверяем публичную страницу поста.
  * Заодно ловим правки, которые не дошли до бота (бот ещё не был в канале): текст перепарсивается.
  */
-export async function checkDeleted(ctx: Ctx, limit = 20) {
+export async function checkDeleted(ctx: Ctx, limit = 15) {
   const { env, store } = ctx;
   // у приватного канала нет публичных страниц
   if (/^-?\d+$/.test(store.channel)) return { checked: 0, removed: 0 };

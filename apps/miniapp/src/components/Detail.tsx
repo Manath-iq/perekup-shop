@@ -53,12 +53,12 @@ export function Detail({ id, preview, botUsername, onClose, onBuy, toast }: Prop
     if (!l) return;
     haptic.tap();
     const link = `https://t.me/${botUsername}?start=l_${l.id}`;
-    const text = `iPhone ${l.family} ${l.storage_gb ? formatStorage(l.storage_gb) : ''} — ${l.price_rub ? formatPrice(l.price_rub) : ''}`;
+    const text = `${l.title} ${l.storage_gb ? formatStorage(l.storage_gb) : ''} — ${l.price_rub ? formatPrice(l.price_rub) : ''}`;
     if (inTelegram) openTgLink(`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`);
     else navigator.clipboard?.writeText(link).then(() => toast('Ссылка скопирована'));
   };
 
-  const media = l?.media ?? (l?.cover ? [{ id: 0, kind: 'photo', url: l.cover, width: null, height: null, position: 0 } as MediaItem] : []);
+  const media = l?.media ?? (l?.cover ? [{ id: 0, kind: 'photo', url: l.cover, poster: null, width: null, height: null, position: 0 } as MediaItem] : []);
   const sold = l && l.status !== 'active';
 
   return (
@@ -90,7 +90,7 @@ export function Detail({ id, preview, botUsername, onClose, onBuy, toast }: Prop
             )}
             {sold && <span class="badge-sold">Продан</span>}
             <h1>
-              iPhone {l.family ?? l.model_raw}
+              {l.title}
               {l.storage_gb ? <span class="muted"> {formatStorage(l.storage_gb)}</span> : null}
             </h1>
             <div class="detail-price">
@@ -221,7 +221,7 @@ function Gallery({ media, onOpen }: { media: MediaItem[]; onOpen: (i: number) =>
           <div class="slide" key={m.id} onClick={() => onOpen(i)}>
             {m.kind === 'video' ? (
               <>
-                <video src={m.url} muted playsInline preload="metadata" />
+                <video src={m.url} poster={m.poster ?? undefined} muted playsInline preload="metadata" />
                 <span class="play glass-btn">
                   <IconPlay size={22} />
                 </span>
@@ -259,7 +259,7 @@ function Viewer({ media, start, onClose }: { media: MediaItem[]; start: number; 
         {media.map((m, i) => (
           <div class="viewer-slide" key={m.id} onClick={m.kind === 'photo' ? onClose : undefined}>
             {m.kind === 'video' ? (
-              <video src={m.url} controls playsInline autoPlay={i === start} />
+              <video src={m.url} poster={m.poster ?? undefined} controls playsInline autoPlay={i === start} />
             ) : (
               <img src={m.url} alt="" />
             )}

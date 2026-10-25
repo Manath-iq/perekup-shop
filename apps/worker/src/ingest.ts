@@ -3,7 +3,7 @@ import type { ListingStatus } from '@vitrina/core/types';
 import type { Ctx } from './store';
 import { now } from './env';
 import type { ListingRow } from './db';
-import { kvMediaStore, TG_FILE_LIMIT } from './media';
+import { BLUR_LIMIT, fetchSource, kvMediaStore, refreshFeedSource } from './media';
 import { llmFallback } from './llm';
 
 export interface IncomingPost {
@@ -138,8 +138,14 @@ export interface IncomingMedia {
   msg_id: number;
   media_group_id: string | null;
   kind: 'photo' | 'video';
-  /** 'tg:<file_id>' для Bot API или https-ссылка CDN для импорта */
+  /** Файл для галереи: 'tg:<file_id>' для Bot API или https-ссылка CDN для импорта */
   source: string;
+  /** Размер фото для обложки (~800 px); у импорта не бывает — берётся source */
+  cover_source?: string | null;
+  /** Самый маленький размер фото — для размытого превью */
+  blur_source?: string | null;
+  /** Кадр-превью видео */
+  poster_source?: string | null;
   file_size?: number | null;
   width?: number | null;
   height?: number | null;
@@ -152,11 +158,15 @@ export interface IncomingMedia {
 export async function addMedia(ctx: Ctx, m: IncomingMedia): Promise<number | null> {
   const { env, store } = ctx;
   await env.DB.prepare(
-    `INSERT INTO media (store_id, media_group_id, msg_id, kind, source, file_size, width, height, position, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (store_id, msg_id, kind) DO UPDATE SET source = excluded.source`,
+    `INSERT INTO media (store_id, media_group_id, msg_id, kind, source, cover_source, blur_source, poster_source, file_size, width, height, position, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (store_id, msg_id, kind) DO UPDATE SET source = excluded.source, cover_source = excluded.cover_source,
+       blur_source = excluded.blur_source, poster_source = COALESCE(excluded.poster_source, media.poster_source)`,
   )
-    .bind(store.id, m.media_group_id, m.msg_id, m.kind, m.source, m.file_size ?? null, m.width ?? null, m.height ?? null, m.msg_id, now())
+    .bind(
+      store.id, m.media_group_id, m.msg_id, m.kind, m.source, m.cover_source ?? null, m.blur_source ?? null, m.poster_source ?? null,
+      m.file_size ?? null, m.width ?? null, m.height ?? null, m.msg_id, now(),
+    )
     .run();
   const listing = await env.DB.prepare(
     `SELECT * FROM listings WHERE store_id = ? AND (msg_id = ? OR (media_group_id IS NOT NULL AND media_group_id = ?))`,
@@ -177,47 +187,72 @@ async function attachGroupMedia({ env }: Ctx, l: ListingRow) {
     .run();
 }
 
-/** Скачать в хранилище файлы привязанных карточек. limit — чтобы уложиться в лимит подзапросов воркера. */
-export async function downloadPending({ env, store }: Ctx, limit = 30): Promise<{ done: number; remaining: number }> {
+interface CoverCandidate {
+  listing_id: number;
+  id: number;
+  msg_id: number;
+  kind: 'photo' | 'video';
+  source: string;
+  cover_source: string | null;
+  blur_source: string | null;
+  poster_source: string | null;
+}
+
+const toBase64 = (buf: ArrayBuffer) => {
+  let bin = '';
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+
+/**
+ * Обложки карточек в наличии — в KV, одна запись на карточку. Берётся первое фото альбома
+ * (или кадр видео, если фото нет) плюс крошечное превью для размытой подложки, пока грузится обложка.
+ * limit держит число подзапросов в лимите бесплатного Workers (50 на вызов).
+ */
+export async function downloadCovers({ env, store }: Ctx, limit = 10): Promise<{ done: number; remaining: number }> {
+  const pick = `SELECT id FROM media WHERE listing_id = l.id ORDER BY (kind = 'photo') DESC, position LIMIT 1`;
   const { results } = await env.DB.prepare(
-    `SELECT id, msg_id, kind, source, file_size FROM media
-     WHERE store_id = ? AND listing_id IS NOT NULL AND storage_key IS NULL
-       AND listing_id NOT IN (SELECT id FROM listings WHERE status = 'sold')
-     ORDER BY listing_id DESC, position LIMIT ?`,
+    `SELECT l.id AS listing_id, m.id, m.msg_id, m.kind, m.source, m.cover_source, m.blur_source, m.poster_source
+     FROM listings l JOIN media m ON m.id = (${pick})
+     WHERE l.store_id = ? AND l.status IN ('active', 'reserved') AND m.storage_key IS NULL
+     ORDER BY l.id DESC LIMIT ?`,
   )
     .bind(store.id, limit)
-    .all<{ id: number; msg_id: number; kind: 'photo' | 'video'; source: string; file_size: number | null }>();
+    .all<CoverCandidate>();
   const kv = kvMediaStore(env);
   let done = 0;
   for (const m of results) {
-    const key = `m/${store.id.replace(/[^\w-]/g, '')}/${m.msg_id}-${m.kind}`;
+    const key = `c/${store.id.replace(/[^\w-]/g, '')}/${m.listing_id}`;
     let stored = 'skip';
+    let blur: string | null = null;
     try {
-      if (m.file_size && m.file_size > TG_FILE_LIMIT) throw new Error('too big');
-      let url = m.source;
-      if (m.source.startsWith('tg:')) {
-        const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${m.source.slice(3)}`);
-        const j = (await r.json()) as { ok: boolean; result?: { file_path: string } };
-        if (!j.ok || !j.result) throw new Error('getFile failed');
-        url = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${j.result.file_path}`;
+      let src = m.kind === 'photo' ? (m.cover_source ?? m.source) : m.poster_source;
+      if (!src) throw new Error('no cover source');
+      let res = await fetchSource(env, src);
+      if (!res && !src.startsWith('tg:')) {
+        const fresh = await refreshFeedSource(env, { id: m.id, msg_id: m.msg_id, kind: m.kind, channel: store.channel });
+        src = (m.kind === 'photo' ? fresh?.source : fresh?.poster) ?? null;
+        res = src ? await fetchSource(env, src) : null;
       }
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`fetch ${res.status}`);
-      const len = +(res.headers.get('content-length') ?? 0);
-      if (len > TG_FILE_LIMIT) throw new Error('too big');
-      const body = await res.arrayBuffer();
-      await kv.put(key, body, m.kind === 'video' ? 'video/mp4' : res.headers.get('content-type') || 'image/jpeg');
+      if (!res) throw new Error('cover fetch failed');
+      await kv.put(key, await res.arrayBuffer(), res.headers.get('content-type')?.startsWith('image/') ? res.headers.get('content-type')! : 'image/jpeg');
       stored = key;
       done++;
+      if (m.blur_source) {
+        const b = await fetchSource(env, m.blur_source);
+        const buf = b ? await b.arrayBuffer() : null;
+        if (buf && buf.byteLength * 1.37 <= BLUR_LIMIT) blur = `data:image/jpeg;base64,${toBase64(buf)}`;
+      }
     } catch (e) {
-      // видео больше лимита и битые файлы пропускаем — в карточке есть ссылка на пост
-      console.warn('media skipped', m.id, String(e));
+      // без обложки карточка всё равно видна — мини-апп покажет заглушку и галерею
+      console.warn('cover skipped', m.id, String(e));
     }
-    await env.DB.prepare('UPDATE media SET storage_key = ? WHERE id = ?').bind(stored, m.id).run();
+    await env.DB.prepare('UPDATE media SET storage_key = ?, blur = COALESCE(?, blur) WHERE id = ?').bind(stored, blur, m.id).run();
   }
   const rest = await env.DB.prepare(
-    `SELECT COUNT(*) AS c FROM media WHERE store_id = ? AND listing_id IS NOT NULL AND storage_key IS NULL
-       AND listing_id NOT IN (SELECT id FROM listings WHERE status = 'sold')`,
+    `SELECT COUNT(*) AS c FROM listings l JOIN media m ON m.id = (${pick})
+     WHERE l.store_id = ? AND l.status IN ('active', 'reserved') AND m.storage_key IS NULL`,
   )
     .bind(store.id)
     .first<{ c: number }>();
@@ -225,8 +260,8 @@ export async function downloadPending({ env, store }: Ctx, limit = 30): Promise<
 }
 
 /**
- * Удаляет из хранилища фото и видео карточек, проданных больше days дней назад, чтобы KV не переполнялся.
- * storage_key сбрасывается в NULL: если пост снова станет актуальным, файлы скачаются заново по file_id.
+ * Удаляет из KV обложки карточек, проданных больше days дней назад. Галерея и видео не хранятся, чистить больше нечего.
+ * storage_key сбрасывается в NULL: если пост снова станет актуальным, обложка скачается заново.
  * limit держит число удалений в бесплатном лимите KV (1000 записей в день, удаление считается записью).
  */
 export async function purgeSoldMedia({ env, store }: Ctx, days = 7, limit = 20): Promise<{ deleted: number }> {

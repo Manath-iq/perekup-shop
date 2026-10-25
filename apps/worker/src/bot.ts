@@ -5,7 +5,8 @@ import { parseStartParam } from '@vitrina/core/store';
 import type { Env } from './env';
 import { adminIds, now } from './env';
 import type { ListingRow } from './db';
-import { addMedia, downloadPending, setStatus, upsertPost } from './ingest';
+import { addMedia, downloadCovers, setStatus, upsertPost } from './ingest';
+import { pickPhotoSizes } from './media';
 import { cardUrl, notifySubscribers, sendAdminPreview, statsText, storeUrl } from './notify';
 import { getStore, getStoreByChannel, type Ctx } from './store';
 
@@ -54,16 +55,19 @@ export function createBot({ env, origin, waitUntil }: Deps) {
     const group = msg.media_group_id ?? null;
 
     if (msg.photo?.length) {
-      const big = msg.photo[msg.photo.length - 1];
+      const { gallery, cover, blur } = pickPhotoSizes(msg.photo);
       await addMedia(ctx, {
         msg_id: msg.message_id, media_group_id: group, kind: 'photo',
-        source: `tg:${big.file_id}`, file_size: big.file_size, width: big.width, height: big.height,
+        source: `tg:${gallery.file_id}`, cover_source: `tg:${cover.file_id}`, blur_source: blur ? `tg:${blur.file_id}` : null,
+        file_size: gallery.file_size, width: gallery.width, height: gallery.height,
       });
     }
     if (msg.video) {
+      const v = msg.video;
       await addMedia(ctx, {
         msg_id: msg.message_id, media_group_id: group, kind: 'video',
-        source: `tg:${msg.video.file_id}`, file_size: msg.video.file_size, width: msg.video.width, height: msg.video.height,
+        source: `tg:${v.file_id}`, poster_source: v.thumbnail ? `tg:${v.thumbnail.file_id}` : null,
+        file_size: v.file_size, width: v.width, height: v.height,
       });
     }
 
@@ -77,14 +81,14 @@ export function createBot({ env, origin, waitUntil }: Deps) {
         waitUntil(
           (async () => {
             if (group) await sleep(ALBUM_SETTLE_MS);
+            // обложку берём, когда альбом собрался, — иначе первым может оказаться не первое фото
+            await downloadCovers(ctx, 1);
             await sendAdminPreview(ctx, origin, listing, res.parsed.missing);
             if (listing.parse_ok) await notifySubscribers(ctx, origin, listing);
           })(),
         );
       }
     }
-    // качаем файлы в фоне, чтобы быстро ответить Telegram
-    waitUntil(downloadPending(ctx, 12));
   }
 
   bot.on('channel_post', (ctx) => handleChannelMessage(ctx.channelPost, false));

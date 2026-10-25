@@ -106,7 +106,7 @@ export function Subscriptions({ preset, available, toast }: Props) {
       </section>
 
       <button class="btn-primary big block" disabled={!family || saving} onClick={save}>
-        {family ? `Подписаться на iPhone ${family}` : 'Выберите модель'}
+        {family ? `Подписаться на ${family}` : 'Выберите модель'}
       </button>
 
       {subs && subs.length > 0 && (
@@ -116,7 +116,7 @@ export function Subscriptions({ preset, available, toast }: Props) {
             {subs.map((s) => (
               <li>
                 <div>
-                  <b>iPhone {s.family}</b>
+                  <b>{s.title}</b>
                   <span class="muted">
                     {[s.storage_gb ? formatStorage(s.storage_gb) : 'любая память', s.max_price ? `до ${formatPrice(s.max_price)}` : null]
                       .filter(Boolean)
