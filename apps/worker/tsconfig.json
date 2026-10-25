@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "lib": ["ES2023"],
+    "types": ["@cloudflare/workers-types"]
+  },
+  "include": ["src", "../../packages/core/src"],
+  "exclude": ["../../packages/core/src/**/*.test.ts"]
+}

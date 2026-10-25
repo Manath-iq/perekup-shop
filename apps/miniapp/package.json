@@ -1,0 +1,5 @@
+{
+  "name": "@vitrina/miniapp",
+  "private": true,
+  "type": "module"
+}
