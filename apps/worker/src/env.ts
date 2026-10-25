@@ -1,7 +1,6 @@
 export interface Env {
   DB: D1Database;
   MEDIA: KVNamespace;
-  AI: Ai;
   ASSETS: Fetcher;
   BOT_TOKEN: string;
   BOT_USERNAME: string;
@@ -9,6 +8,9 @@ export interface Env {
   ADMIN_IDS: string;
   WEBHOOK_SECRET: string;
   ADMIN_API_KEY: string;
+  GEMINI_API_KEY?: string;
+  /** Клиентский деплой: id единственного магазина. У демо-деплоя пусто — магазин выбирается по ссылке */
+  STORE_ID?: string;
   PUBLIC_READ?: string;
 }
 

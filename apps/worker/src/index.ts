@@ -1,6 +1,8 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { webhookCallback } from 'grammy';
-import { listingTitle, formatPrice } from '@vitrina/core/parser';
+import { listingTitle, formatPrice } from '@vitrina/core/format';
+import type { StoreConfig } from '@vitrina/core/store';
+import type { ParseProfile } from '@vitrina/core/profile';
 import type { Env } from './env';
 import { now } from './env';
 import { verifyInitData, type TgUser } from './auth';
@@ -9,11 +11,12 @@ import { serveMedia } from './media';
 import { createBot } from './bot';
 import { sendBuyRequest, sendWeeklyStats } from './notify';
 import { checkDeleted, importChannel, importReviews, type ReviewsMeta } from './importer';
-import { downloadPending, purgeSoldMedia } from './ingest';
-import { STORE } from './config';
+import { downloadPending, purgeSoldMedia, reparse } from './ingest';
+import { listStores, resolveStore, saveStore, type Ctx, type Store } from './store';
 
-type Ctx = { Bindings: Env; Variables: { user: TgUser | null } };
-const app = new Hono<Ctx>();
+type HonoEnv = { Bindings: Env; Variables: { user: TgUser | null; store: Store } };
+const app = new Hono<HonoEnv>();
+const ctxOf = (c: { env: Env; get(k: 'store'): Store }): Ctx => ({ env: c.env, store: c.get('store') });
 
 // ——— Бот ———
 app.post('/bot', (c) => {
@@ -26,8 +29,10 @@ app.get('/media/*', (c) => serveMedia(c.env, decodeURIComponent(c.req.path.slice
 
 // ——— API: подпись initData проверяется на каждом запросе ———
 app.use('/api/*', async (c, next) => {
-  const initData = c.req.header('x-init-data') ?? '';
-  const user = await verifyInitData(initData, c.env.BOT_TOKEN);
+  const store = await resolveStore(c.env, c.req.header('x-store') ?? c.req.query('s'));
+  if (!store) return c.json({ error: 'store not found' }, 404);
+  c.set('store', store);
+  const user = await verifyInitData(c.req.header('x-init-data') ?? '', c.env.BOT_TOKEN);
   const readOnly = c.req.method === 'GET' && !c.req.path.startsWith('/api/subscriptions');
   if (!user && !(readOnly && c.env.PUBLIC_READ === '1')) return c.json({ error: 'unauthorized' }, 401);
   c.set('user', user);
@@ -38,7 +43,9 @@ const num = (v: string | undefined) => (v ? parseInt(v, 10) || undefined : undef
 
 app.get('/api/listings', async (c) => {
   const q = c.req.query();
-  const items = await queryListings(c.env, {
+  const items = await queryListings(ctxOf(c), {
+    category: q.category || undefined,
+    model_id: q.model || undefined,
     family: q.family || undefined,
     storage: num(q.storage),
     price_min: num(q.price_min),
@@ -52,89 +59,145 @@ app.get('/api/listings', async (c) => {
 });
 
 app.get('/api/listings/:id', async (c) => {
-  const l = await getListing(c.env, +c.req.param('id'));
+  const l = await getListing(ctxOf(c), +c.req.param('id'));
   if (!l || l.status === 'hidden') return c.json({ error: 'not found' }, 404);
   return c.json(l);
 });
 
-app.get('/api/facets', async (c) => c.json(await getFacets(c.env)));
+app.get('/api/facets', async (c) => c.json(await getFacets(ctxOf(c))));
 
 app.get('/api/store', async (c) => {
-  const reviews = await c.env.MEDIA.get<ReviewsMeta>('meta:reviews', 'json');
-  return c.json({ name: STORE.name, channel: STORE.channel, seller: STORE.sellerUsername, about: STORE.about, reviews });
+  const { store } = ctxOf(c);
+  const reviews = await c.env.MEDIA.get<ReviewsMeta>(`meta:reviews:${store.id}`, 'json');
+  const cfg = store.config;
+  return c.json({
+    id: store.id,
+    name: cfg.name,
+    channel: cfg.channel,
+    seller: cfg.seller,
+    avatar: cfg.avatar ?? null,
+    theme: cfg.theme ?? null,
+    about: { city: '', delivery: '', warranty: '', payment: '', ...cfg.about, demo: store.kind === 'demo' },
+    reviews,
+  });
 });
 
-const EVENT_TYPES = new Set(['app_open', 'card_view', 'subscribe']);
+const EVENT_TYPES = new Set(['app_open', 'card_view', 'subscribe', 'search']);
 app.post('/api/events', async (c) => {
   const user = c.get('user')!;
-  const body = await c.req.json<{ type: string; listing_id?: number }>().catch(() => null);
+  const body = await c.req.json<{ type: string; listing_id?: number; model_id?: string; meta?: unknown }>().catch(() => null);
   if (!body || !EVENT_TYPES.has(body.type)) return c.json({ error: 'bad event' }, 400);
-  if (body.type === 'app_open') c.executionCtx.waitUntil(upsertUser(c.env, user));
-  await logEvent(c.env, body.type, user.id, body.listing_id ?? null);
+  const ctx = ctxOf(c);
+  if (body.type === 'app_open') c.executionCtx.waitUntil(upsertUser(ctx, user));
+  await logEvent(ctx, body.type, user.id, { listing_id: body.listing_id, model_id: body.model_id, meta: body.meta });
   return c.json({ ok: true });
 });
 
 app.post('/api/buy', async (c) => {
   const user = c.get('user')!;
+  const ctx = ctxOf(c);
   const { listing_id } = await c.req.json<{ listing_id: number }>();
-  const l = await getListingRow(c.env, listing_id);
+  const l = await getListingRow(ctx, listing_id);
   if (!l) return c.json({ error: 'not found' }, 404);
-  await logEvent(c.env, 'buy_click', user.id, l.id);
-  c.executionCtx.waitUntil(sendBuyRequest(c.env, l, user));
-  const text = `Здравствуйте! Хочу ${listingTitle(l)}${l.price_rub ? ` за ${formatPrice(l.price_rub)}` : ''} (пост ${l.channel_msg_id})`;
-  return c.json({ ok: true, text, url: `https://t.me/${STORE.sellerUsername}?text=${encodeURIComponent(text)}` });
+  await logEvent(ctx, 'buy_click', user.id, { listing_id: l.id, model_id: l.model_id });
+  await c.env.DB.prepare('INSERT INTO leads (store_id, listing_id, tg_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(ctx.store.id, l.id, user.id, now(), now())
+    .run();
+  c.executionCtx.waitUntil(sendBuyRequest(ctx, l, user));
+  const text = `Здравствуйте! Хочу ${listingTitle(l)}${l.price ? ` за ${formatPrice(l.price)}` : ''} (пост ${l.msg_id})`;
+  return c.json({ ok: true, text, url: `https://t.me/${ctx.store.config.seller}?text=${encodeURIComponent(text)}` });
 });
 
-app.get('/api/subscriptions', async (c) => c.json({ items: await listSubscriptions(c.env, c.get('user')!.id) }));
+app.get('/api/subscriptions', async (c) => c.json({ items: await listSubscriptions(ctxOf(c), c.get('user')!.id) }));
 
 app.post('/api/subscriptions', async (c) => {
   const user = c.get('user')!;
-  const b = await c.req.json<{ family: string; storage_gb?: number | null; max_price?: number | null }>();
-  if (!b.family) return c.json({ error: 'family required' }, 400);
-  await c.env.DB.prepare(
-    'INSERT INTO subscriptions (tg_user_id, family, storage_gb, max_price, created_at) VALUES (?, ?, ?, ?, ?)',
+  const ctx = ctxOf(c);
+  const b = await c.req.json<{ model_id?: string; family?: string; storage_gb?: number | null; max_price?: number | null }>();
+  // мини-апп прототипа присылает короткое имя модели — находим её id по карточкам магазина
+  const model = await c.env.DB.prepare(
+    `SELECT model_id, title FROM listings WHERE store_id = ? AND model_id IS NOT NULL AND (model_id = ? OR short = ?) LIMIT 1`,
   )
-    .bind(user.id, b.family, b.storage_gb || null, b.max_price || null, now())
+    .bind(ctx.store.id, b.model_id ?? '', b.family ?? '')
+    .first<{ model_id: string; title: string }>();
+  if (!model) return c.json({ error: 'model required' }, 400);
+  await c.env.DB.prepare(
+    'INSERT INTO subscriptions (store_id, tg_user_id, model_id, title, storage_gb, max_price, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  )
+    .bind(ctx.store.id, user.id, model.model_id, model.title, b.storage_gb || null, b.max_price || null, now())
     .run();
-  await logEvent(c.env, 'subscribe', user.id);
-  c.executionCtx.waitUntil(upsertUser(c.env, user));
-  return c.json({ items: await listSubscriptions(c.env, user.id) });
+  await logEvent(ctx, 'subscribe', user.id, { model_id: model.model_id, meta: { storage_gb: b.storage_gb, max_price: b.max_price } });
+  c.executionCtx.waitUntil(upsertUser(ctx, user));
+  return c.json({ items: await listSubscriptions(ctx, user.id) });
 });
 
 app.delete('/api/subscriptions/:id', async (c) => {
   const user = c.get('user')!;
-  await c.env.DB.prepare('UPDATE subscriptions SET active = 0 WHERE id = ? AND tg_user_id = ?')
-    .bind(+c.req.param('id'), user.id)
+  const ctx = ctxOf(c);
+  await c.env.DB.prepare('UPDATE subscriptions SET active = 0 WHERE id = ? AND tg_user_id = ? AND store_id = ?')
+    .bind(+c.req.param('id'), user.id, ctx.store.id)
     .run();
-  return c.json({ items: await listSubscriptions(c.env, user.id) });
+  return c.json({ items: await listSubscriptions(ctx, user.id) });
 });
 
-// ——— Админка для импорта (ключ в секрете ADMIN_API_KEY) ———
+// ——— Админка для CLI (ключ в секрете ADMIN_API_KEY) ———
 app.use('/admin/*', async (c, next) => {
   if (!c.env.ADMIN_API_KEY || c.req.header('x-admin-key') !== c.env.ADMIN_API_KEY) return c.json({ error: 'forbidden' }, 403);
   await next();
 });
-app.post('/admin/import', async (c) => c.json(await importChannel(c.env, c.req.query('channel') || STORE.channel, num(c.req.query('pages')) ?? 3)));
-app.post('/admin/media', async (c) => c.json(await downloadPending(c.env, 35)));
-app.post('/admin/reviews', async (c) => c.json(await importReviews(c.env)));
-app.post('/admin/check', async (c) => c.json(await checkDeleted(c.env)));
-app.post('/admin/purge', async (c) => c.json(await purgeSoldMedia(c.env, num(c.req.query('days')) ?? 7)));
+
+app.put('/admin/store', async (c) => {
+  const b = await c.req.json<{ config: StoreConfig; profile: Partial<ParseProfile>; kind?: 'client' | 'demo'; expires_at?: number | null }>();
+  if (!b?.config?.slug || !b.config.channel) return c.json({ error: 'config.slug и config.channel обязательны' }, 400);
+  if (c.env.STORE_ID && b.config.slug !== c.env.STORE_ID) return c.json({ error: `этот деплой обслуживает магазин ${c.env.STORE_ID}` }, 400);
+  await saveStore(c.env, b);
+  return c.json({ ok: true });
+});
+
+// остальные команды работают с магазином из ?store= (у клиентского деплоя — с единственным)
+type AdminCtx = Context<HonoEnv>;
+const withStore = (fn: (ctx: Ctx, c: AdminCtx) => Promise<unknown>) => async (c: AdminCtx) => {
+  const store = await resolveStore(c.env, c.req.query('store'));
+  if (!store) return c.json({ error: 'store not found' }, 404);
+  return c.json(await fn({ env: c.env, store }, c));
+};
+app.post('/admin/import', withStore((ctx, c) => importChannel(ctx, num(c.req.query('pages')) ?? 3)));
+app.post('/admin/media', withStore((ctx) => downloadPending(ctx, 35)));
+app.post('/admin/reviews', withStore((ctx) => importReviews(ctx)));
+app.post('/admin/check', withStore((ctx) => checkDeleted(ctx)));
+app.post('/admin/purge', withStore((ctx, c) => purgeSoldMedia(ctx, num(c.req.query('days')) ?? 7)));
+app.post('/admin/reparse', withStore((ctx, c) => reparse(ctx, num(c.req.query('offset')) ?? 0, num(c.req.query('limit')) ?? 25)));
+
+/** Часовая работа: удалённые посты, докачка и чистка медиа, старые события */
+async function hourly(env: Env) {
+  for (const store of await listStores(env)) {
+    const ctx: Ctx = { env, store };
+    await checkDeleted(ctx, env.STORE_ID ? 20 : 5);
+    await downloadPending(ctx, env.STORE_ID ? 20 : 5);
+    await purgeSoldMedia(ctx);
+  }
+  await env.DB.prepare('DELETE FROM events WHERE created_at < ?').bind(now() - 90 * 86400).run();
+  await env.DB.prepare('DELETE FROM media WHERE listing_id IS NULL AND created_at < ?').bind(now() - 86400).run();
+}
+
+/** Еженедельная статистика — понедельник, 10:00 МСК */
+const isWeeklySlot = (d: Date) => d.getUTCDay() === 1 && d.getUTCHours() === 7;
+
+async function runCron(env: Env, at: Date) {
+  await hourly(env);
+  if (isWeeklySlot(at)) for (const store of await listStores(env)) if (store.kind === 'client') await sendWeeklyStats({ env, store });
+}
+
+// Планировщик (один cron на все деплои) дёргает этот адрес раз в час
+app.post('/cron', async (c) => {
+  if (!c.env.ADMIN_API_KEY || c.req.header('x-admin-key') !== c.env.ADMIN_API_KEY) return c.json({ error: 'forbidden' }, 403);
+  c.executionCtx.waitUntil(runCron(c.env, new Date()));
+  return c.json({ ok: true });
+});
 
 export default {
   fetch: app.fetch,
   async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    if (event.cron === '0 7 * * 1') {
-      ctx.waitUntil(sendWeeklyStats(env));
-      return;
-    }
-    ctx.waitUntil(
-      (async () => {
-        await checkDeleted(env);
-        await downloadPending(env, 20);
-        await purgeSoldMedia(env);
-        await env.DB.prepare('DELETE FROM events WHERE created_at < ?').bind(now() - 90 * 86400).run();
-        await env.DB.prepare('DELETE FROM media WHERE listing_id IS NULL AND created_at < ?').bind(now() - 86400).run();
-      })(),
-    );
+    ctx.waitUntil(runCron(env, new Date(event.scheduledTime)));
   },
 } satisfies ExportedHandler<Env>;

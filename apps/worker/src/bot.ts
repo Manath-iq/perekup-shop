@@ -1,12 +1,13 @@
 import { Bot, InlineKeyboard, type Context } from 'grammy';
 import type { Message, UserFromGetMe } from 'grammy/types';
-import { formatPrice, listingTitle } from '@vitrina/core/parser';
+import { formatPrice, listingTitle } from '@vitrina/core/format';
+import { parseStartParam } from '@vitrina/core/store';
 import type { Env } from './env';
 import { adminIds, now } from './env';
 import type { ListingRow } from './db';
 import { addMedia, downloadPending, setStatus, upsertPost } from './ingest';
-import { notifySubscribers, sendAdminPreview, statsText } from './notify';
-import { STORE } from './config';
+import { cardUrl, notifySubscribers, sendAdminPreview, statsText, storeUrl } from './notify';
+import { getStore, getStoreByChannel, type Ctx } from './store';
 
 interface Deps {
   env: Env;
@@ -21,11 +22,15 @@ const postUrl = (chat: Message['chat'], id: number) =>
 
 const channelKey = (chat: Message['chat']) => ('username' in chat && chat.username ? chat.username : String(chat.id));
 
+/** Пауза перед превью: фото альбома приходят отдельными апдейтами, ждём, пока соберутся */
+const ALBUM_SETTLE_MS = 4000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export function createBot({ env, origin, waitUntil }: Deps) {
   const botInfo = {
     id: +env.BOT_TOKEN.split(':')[0],
     is_bot: true,
-    first_name: STORE.name,
+    first_name: 'Витрина',
     username: env.BOT_USERNAME,
     can_join_groups: true,
     can_read_all_group_messages: false,
@@ -34,120 +39,151 @@ export function createBot({ env, origin, waitUntil }: Deps) {
   const bot = new Bot(env.BOT_TOKEN, { botInfo });
   const admins = adminIds(env);
   const isAdmin = (ctx: Context) => !!ctx.from && admins.includes(ctx.from.id);
-  const catalogKb = () => new InlineKeyboard().webApp('📱 Открыть каталог', origin);
+  /** Магазин для команд в личке: у клиентского деплоя он один */
+  const ownStore = async (): Promise<Ctx | null> => {
+    const store = env.STORE_ID ? await getStore(env, env.STORE_ID) : null;
+    return store ? { env, store } : null;
+  };
 
   // ——— Канал: новые посты и правки ———
   async function handleChannelMessage(msg: Message, edited: boolean) {
-    const channel = channelKey(msg.chat);
+    const store = await getStoreByChannel(env, channelKey(msg.chat));
+    if (!store) return;
+    const ctx: Ctx = { env, store };
     const text = msg.caption ?? msg.text ?? '';
     const group = msg.media_group_id ?? null;
 
     if (msg.photo?.length) {
       const big = msg.photo[msg.photo.length - 1];
-      await addMedia(env, {
-        channel, msg_id: msg.message_id, media_group_id: group, kind: 'photo',
+      await addMedia(ctx, {
+        msg_id: msg.message_id, media_group_id: group, kind: 'photo',
         source: `tg:${big.file_id}`, file_size: big.file_size, width: big.width, height: big.height,
       });
     }
     if (msg.video) {
-      await addMedia(env, {
-        channel, msg_id: msg.message_id, media_group_id: group, kind: 'video',
+      await addMedia(ctx, {
+        msg_id: msg.message_id, media_group_id: group, kind: 'video',
         source: `tg:${msg.video.file_id}`, file_size: msg.video.file_size, width: msg.video.width, height: msg.video.height,
       });
     }
 
     if (text) {
-      const res = await upsertPost(env, {
-        channel, msg_id: msg.message_id, text, media_group_id: group,
+      const res = await upsertPost(ctx, {
+        msg_id: msg.message_id, text, media_group_id: group,
         date: edited ? msg.date : msg.date || now(), post_url: postUrl(msg.chat, msg.message_id),
       });
-      if (res?.created && res.listing.status === 'active') {
-        waitUntil(sendAdminPreview(env, origin, res.listing));
-        waitUntil(notifySubscribers(env, origin, res.listing));
+      if (res?.created) {
+        const listing = res.listing;
+        waitUntil(
+          (async () => {
+            if (group) await sleep(ALBUM_SETTLE_MS);
+            await sendAdminPreview(ctx, origin, listing, res.parsed.missing);
+            if (listing.parse_ok) await notifySubscribers(ctx, origin, listing);
+          })(),
+        );
       }
     }
     // качаем файлы в фоне, чтобы быстро ответить Telegram
-    waitUntil(downloadPending(env, 12));
+    waitUntil(downloadPending(ctx, 12));
   }
 
   bot.on('channel_post', (ctx) => handleChannelMessage(ctx.channelPost, false));
   bot.on('edited_channel_post', (ctx) => handleChannelMessage(ctx.editedChannelPost, true));
 
   // ——— Покупатель ———
-  bot.command('start', async (ctx) => {
-    // ссылка «Поделиться» из карточки: t.me/<бот>?start=l_12
-    const shared = ctx.match.match(/^l_(\d+)$/);
-    if (shared) {
-      const l = await env.DB.prepare(`SELECT * FROM listings WHERE id = ? AND status = 'active'`).bind(+shared[1]).first<ListingRow>();
+  bot.command('start', async (tg) => {
+    const start = parseStartParam(tg.match);
+    const own = await ownStore();
+    const store = own?.store ?? (start.store ? await getStore(env, start.store) : null);
+    if (!store) {
+      return tg.reply('Это Витрина — магазин для Telegram-каналов с техникой. Откройте ссылку на магазин, которую вам прислали.');
+    }
+    const ctx: Ctx = { env, store };
+    if (start.listing) {
+      const l = await env.DB.prepare(`SELECT * FROM listings WHERE id = ? AND store_id = ? AND status IN ('active', 'reserved')`)
+        .bind(start.listing, store.id)
+        .first<ListingRow>();
       if (l) {
-        return ctx.reply(`📱 <b>${listingTitle(l)}</b>${l.price_rub ? ' — ' + formatPrice(l.price_rub) : ''}`, {
+        return tg.reply(`📱 <b>${listingTitle(l)}</b>${l.price ? ' — ' + formatPrice(l.price) : ''}`, {
           parse_mode: 'HTML',
-          reply_markup: new InlineKeyboard().webApp('Открыть карточку', `${origin}/?l=${l.id}`).row().webApp('Весь каталог', origin),
+          reply_markup: new InlineKeyboard().webApp('Открыть карточку', cardUrl(ctx, origin, l.id)).row().webApp('Весь каталог', storeUrl(ctx, origin)),
         });
       }
     }
-    await ctx.reply(
-      `Здравствуйте! Это каталог <b>${STORE.name}</b> — только телефоны, которые есть в наличии прямо сейчас.\n\nВыберите модель, посмотрите фото и характеристики и напишите продавцу в один тап.`,
-      { parse_mode: 'HTML', reply_markup: catalogKb() },
+    await tg.reply(
+      `Здравствуйте! Это каталог <b>${store.config.name}</b> — только то, что есть в наличии прямо сейчас.\n\nВыберите модель, посмотрите фото и характеристики и напишите продавцу в один тап.`,
+      { parse_mode: 'HTML', reply_markup: new InlineKeyboard().webApp('📱 Открыть каталог', storeUrl(ctx, origin)) },
     );
-    if (isAdmin(ctx)) {
-      await ctx.reply('Вы админ. Команды: /list, /stats, /sold id, /hide id, /show id');
-    }
+    if (isAdmin(tg) && own) await tg.reply('Вы админ. Команды: /list, /stats, /sold id, /hide id, /show id');
   });
 
   // ——— Продавец ———
-  bot.command('list', async (ctx) => {
-    if (!isAdmin(ctx)) return;
+  bot.command('list', async (tg) => {
+    const ctx = await ownStore();
+    if (!isAdmin(tg) || !ctx) return;
     const { results } = await env.DB.prepare(
-      `SELECT * FROM listings WHERE status = 'active' ORDER BY created_at DESC`,
-    ).all<ListingRow>();
-    if (!results.length) return ctx.reply('Активных карточек нет.');
+      `SELECT * FROM listings WHERE store_id = ? AND status IN ('active', 'reserved') ORDER BY created_at DESC`,
+    )
+      .bind(ctx.store.id)
+      .all<ListingRow>();
+    if (!results.length) return tg.reply('Активных карточек нет.');
     const lines = results.map((l) => {
       const days = Math.max(0, Math.floor((now() - l.created_at) / 86400));
-      return `<code>${l.id}</code> ${listingTitle(l)} — ${l.price_rub ? formatPrice(l.price_rub) : '?'} · ${days} дн.${l.parse_ok ? '' : ' ⚠️'}`;
+      const flags = `${l.status === 'reserved' ? ' 🔒' : ''}${l.parse_ok || l.confirmed ? '' : ' ⚠️'}`;
+      return `<code>${l.id}</code> ${listingTitle(l)} — ${l.price ? formatPrice(l.price) : '?'} · ${days} дн.${flags}`;
     });
-    await ctx.reply(`<b>В наличии: ${results.length}</b>\n\n${lines.join('\n')}`, { parse_mode: 'HTML' });
+    await tg.reply(`<b>В наличии: ${results.length}</b>\n\n${lines.join('\n')}\n\n⚠️ — ждёт «Всё верно»`, { parse_mode: 'HTML' });
   });
 
-  bot.command('stats', async (ctx) => {
-    if (!isAdmin(ctx)) return;
-    await ctx.reply(await statsText(env), { parse_mode: 'HTML' });
+  bot.command('stats', async (tg) => {
+    const ctx = await ownStore();
+    if (!isAdmin(tg) || !ctx) return;
+    await tg.reply(await statsText(ctx), { parse_mode: 'HTML' });
   });
 
   for (const [cmd, status, done] of [
     ['sold', 'sold', 'снята как проданная'],
     ['hide', 'hidden', 'скрыта'],
     ['show', 'active', 'снова в каталоге'],
+    ['reserve', 'reserved', 'забронирована'],
   ] as const) {
-    bot.command(cmd, async (ctx) => {
-      if (!isAdmin(ctx)) return;
-      const id = parseInt(ctx.match, 10);
-      if (!id) return ctx.reply(`Укажите id карточки: /${cmd} 12. Список — /list`);
-      const l = await setStatus(env, id, status);
-      await ctx.reply(l ? `${listingTitle(l)} — ${done}.` : 'Карточка не найдена.');
+    bot.command(cmd, async (tg) => {
+      const ctx = await ownStore();
+      if (!isAdmin(tg) || !ctx) return;
+      const id = parseInt(tg.match, 10);
+      if (!id) return tg.reply(`Укажите id карточки: /${cmd} 12. Список — /list`);
+      const l = await setStatus(ctx, id, status);
+      await tg.reply(l ? `${listingTitle(l)} — ${done}.` : 'Карточка не найдена.');
     });
   }
 
-  bot.callbackQuery(/^(ok|hide):(\d+)$/, async (ctx) => {
-    if (!isAdmin(ctx)) return ctx.answerCallbackQuery();
-    const [, action, idStr] = ctx.match;
+  bot.callbackQuery(/^(ok|hide):(\d+)$/, async (tg) => {
+    const ctx = await ownStore();
+    if (!isAdmin(tg) || !ctx) return tg.answerCallbackQuery();
+    const [, action, idStr] = tg.match;
     const id = +idStr;
     if (action === 'ok') {
-      await env.DB.prepare('UPDATE listings SET confirmed = 1, parse_ok = 1 WHERE id = ?').bind(id).run();
-      await ctx.answerCallbackQuery('Отлично, карточка в каталоге');
+      const l = await env.DB.prepare('UPDATE listings SET confirmed = 1 WHERE id = ? AND store_id = ? RETURNING *').bind(id, ctx.store.id).first<ListingRow>();
+      await tg.answerCallbackQuery('Отлично, карточка в каталоге');
+      // неуверенная карточка до подтверждения была скрыта — подписчики узнают о ней только сейчас
+      if (l && !l.parse_ok) waitUntil(notifySubscribers(ctx, origin, l));
     } else {
-      await setStatus(env, id, 'hidden');
-      await ctx.answerCallbackQuery('Скрыто. Вернуть: /show ' + id);
+      await setStatus(ctx, id, 'hidden');
+      await tg.answerCallbackQuery('Скрыто. Вернуть: /show ' + id);
     }
-    await ctx.editMessageReplyMarkup({
-      reply_markup: new InlineKeyboard().webApp(action === 'ok' ? '✅ Подтверждено · открыть' : '🙈 Скрыто · открыть', `${origin}/?l=${id}`),
-    }).catch(() => {});
+    await tg
+      .editMessageReplyMarkup({
+        reply_markup: new InlineKeyboard().webApp(action === 'ok' ? '✅ Подтверждено · открыть' : '🙈 Скрыто · открыть', cardUrl(ctx, origin, id)),
+      })
+      .catch(() => {});
   });
 
   // Всё остальное — кнопка каталога
-  bot.on('message', async (ctx) => {
-    if (ctx.chat.type !== 'private') return;
-    await ctx.reply('Все телефоны в наличии — в каталоге 👇', { reply_markup: catalogKb() });
+  bot.on('message', async (tg) => {
+    if (tg.chat.type !== 'private') return;
+    const ctx = await ownStore();
+    if (!ctx) return;
+    await tg.reply('Всё, что есть в наличии, — в каталоге 👇', { reply_markup: new InlineKeyboard().webApp('📱 Открыть каталог', storeUrl(ctx, origin)) });
   });
 
   bot.catch((err) => console.error('bot error', err.error));

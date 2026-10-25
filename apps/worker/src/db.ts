@@ -1,30 +1,32 @@
-import type { Facets, Listing, MediaItem, Subscription } from '@vitrina/core/types';
-import type { Env } from './env';
+import { CATEGORIES, type Attrs, type Category } from '@vitrina/core/catalog';
+import type { Facets, Listing, ListingStatus, MediaItem, ModelFacet, Subscription } from '@vitrina/core/types';
+import type { Ctx, Store } from './store';
+import { now } from './env';
 
 export interface ListingRow {
   id: number;
-  source_channel: string;
-  channel_msg_id: number;
+  store_id: string;
+  msg_id: number;
   media_group_id: string | null;
-  category: string;
-  model_raw: string | null;
-  family: string | null;
+  category: Category;
+  brand: string | null;
+  model_id: string | null;
+  line: string | null;
+  short: string | null;
+  title: string;
+  price: number | null;
   storage_gb: number | null;
-  condition: string | null;
-  sim: string | null;
-  has_physical_sim: number | null;
   battery_pct: number | null;
-  battery_cycles: number | null;
-  ios: string | null;
+  condition: string | null;
+  physical_sim: number | null;
+  attrs: string;
   pluses: string;
   nuances: string;
-  kit: string | null;
-  full_kit: number;
-  price_rub: number | null;
-  status: 'active' | 'sold' | 'hidden';
+  status: ListingStatus;
+  confidence: number;
   parse_ok: number;
+  parsed_by: 'rules' | 'llm';
   confirmed: number;
-  raw_text: string;
   post_url: string;
   created_at: number;
   updated_at: number;
@@ -34,39 +36,65 @@ export interface ListingRow {
 export const mediaUrl = (key: string) => `/media/${key}`;
 
 export function toListing(r: ListingRow & { cover_key?: string | null; old_price?: number | null }): Listing {
+  const attrs: Attrs = JSON.parse(r.attrs);
+  const old = r.old_price && r.price && r.old_price > r.price ? r.old_price : null;
   return {
     id: r.id,
-    channel_msg_id: r.channel_msg_id,
-    family: r.family,
-    model_raw: r.model_raw,
-    storage_gb: r.storage_gb,
-    condition: r.condition,
-    sim: r.sim,
-    has_physical_sim: r.has_physical_sim === null ? null : !!r.has_physical_sim,
-    battery_pct: r.battery_pct,
-    battery_cycles: r.battery_cycles,
-    ios: r.ios,
+    msg_id: r.msg_id,
+    category: r.category,
+    brand: r.brand,
+    model_id: r.model_id,
+    line: r.line,
+    short: r.short,
+    title: r.title,
+    price: r.price,
+    old_price: old,
+    attrs,
     pluses: JSON.parse(r.pluses),
     nuances: JSON.parse(r.nuances),
-    kit: r.kit,
-    full_kit: !!r.full_kit,
-    price_rub: r.price_rub,
-    old_price_rub: r.old_price && r.price_rub && r.old_price > r.price_rub ? r.old_price : null,
     status: r.status,
     post_url: r.post_url,
     created_at: r.created_at,
     cover: r.cover_key ? mediaUrl(r.cover_key) : null,
+    // поля прототипа для текущего мини-аппа
+    channel_msg_id: r.msg_id,
+    family: r.short,
+    model_raw: r.title,
+    storage_gb: attrs.storage_gb ?? null,
+    condition: attrs.condition ?? null,
+    sim: attrs.sim ?? null,
+    has_physical_sim: attrs.physical_sim ?? null,
+    battery_pct: attrs.battery_pct ?? null,
+    battery_cycles: attrs.battery_cycles ?? null,
+    ios: attrs.os_version ?? null,
+    kit: attrs.kit ?? null,
+    full_kit: !!attrs.full_kit,
+    price_rub: r.price,
+    old_price_rub: old,
   };
+}
+
+/**
+ * Что видит покупатель: в наличии или в брони. Неуверенно разобранные карточки клиента ждут «Всё верно»;
+ * у демо подтверждать некому, поэтому достаточно модели и цены.
+ */
+export function visibleWhere(store: Store) {
+  const confirmed =
+    store.kind === 'demo' ? '(l.parse_ok = 1 OR l.confirmed = 1 OR (l.model_id IS NOT NULL AND l.price IS NOT NULL))' : '(l.parse_ok = 1 OR l.confirmed = 1)';
+  return `l.store_id = ? AND l.status IN ('active', 'reserved') AND ${confirmed}`;
 }
 
 const LISTING_SELECT = `
   SELECT l.*,
     (SELECT storage_key FROM media m WHERE m.listing_id = l.id AND m.kind = 'photo'
        AND m.storage_key IS NOT NULL AND m.storage_key != 'skip' ORDER BY position LIMIT 1) AS cover_key,
-    (SELECT price_rub FROM price_history p WHERE p.listing_id = l.id ORDER BY changed_at DESC LIMIT 1) AS old_price
+    (SELECT price FROM price_history p WHERE p.listing_id = l.id ORDER BY changed_at DESC LIMIT 1) AS old_price
   FROM listings l`;
 
 export interface ListingQuery {
+  category?: string;
+  model_id?: string;
+  /** Короткое имя модели — так фильтрует мини-апп прототипа */
   family?: string;
   storage?: number;
   price_min?: number;
@@ -77,31 +105,35 @@ export interface ListingQuery {
   sort?: 'new' | 'cheap' | 'expensive' | 'battery';
 }
 
-export async function queryListings(env: Env, q: ListingQuery): Promise<Listing[]> {
-  const where = [`l.status = 'active'`];
-  const args: unknown[] = [];
-  if (q.family) (where.push('l.family = ?'), args.push(q.family));
-  if (q.storage) (where.push('l.storage_gb = ?'), args.push(q.storage));
-  if (q.price_min) (where.push('l.price_rub >= ?'), args.push(q.price_min));
-  if (q.price_max) (where.push('l.price_rub <= ?'), args.push(q.price_max));
-  if (q.battery_min) (where.push('l.battery_pct >= ?'), args.push(q.battery_min));
-  if (q.condition) (where.push('l.condition = ?'), args.push(q.condition));
-  if (q.sim === 'physical') where.push('l.has_physical_sim = 1');
-  if (q.sim === 'esim') where.push('l.has_physical_sim = 0');
-  const order = {
-    new: 'l.created_at DESC',
-    cheap: 'l.price_rub ASC',
-    expensive: 'l.price_rub DESC',
-    battery: 'l.battery_pct DESC',
-  }[q.sort ?? 'new'] ?? 'l.created_at DESC';
+export async function queryListings({ env, store }: Ctx, q: ListingQuery): Promise<Listing[]> {
+  const where = [visibleWhere(store)];
+  const args: unknown[] = [store.id];
+  const add = (sql: string, v: unknown) => (where.push(sql), args.push(v));
+  if (q.category) add('l.category = ?', q.category);
+  if (q.model_id) add('l.model_id = ?', q.model_id);
+  if (q.family) add('l.short = ?', q.family);
+  if (q.storage) add('l.storage_gb = ?', q.storage);
+  if (q.price_min) add('l.price >= ?', q.price_min);
+  if (q.price_max) add('l.price <= ?', q.price_max);
+  if (q.battery_min) add('l.battery_pct >= ?', q.battery_min);
+  if (q.condition) add('l.condition = ?', q.condition);
+  if (q.sim === 'physical') where.push('l.physical_sim = 1');
+  if (q.sim === 'esim') where.push('l.physical_sim = 0');
+  const order =
+    {
+      new: 'l.created_at DESC',
+      cheap: 'l.price ASC',
+      expensive: 'l.price DESC',
+      battery: 'l.battery_pct DESC',
+    }[q.sort ?? 'new'] ?? 'l.created_at DESC';
   const { results } = await env.DB.prepare(`${LISTING_SELECT} WHERE ${where.join(' AND ')} ORDER BY ${order}`)
     .bind(...args)
     .all<ListingRow>();
   return results.map(toListing);
 }
 
-export async function getListing(env: Env, id: number): Promise<Listing | null> {
-  const row = await env.DB.prepare(`${LISTING_SELECT} WHERE l.id = ?`).bind(id).first<ListingRow>();
+export async function getListing({ env, store }: Ctx, id: number): Promise<Listing | null> {
+  const row = await env.DB.prepare(`${LISTING_SELECT} WHERE l.id = ? AND l.store_id = ?`).bind(id, store.id).first<ListingRow>();
   if (!row) return null;
   const listing = toListing(row);
   const { results } = await env.DB.prepare(
@@ -116,27 +148,39 @@ export async function getListing(env: Env, id: number): Promise<Listing | null> 
   return listing;
 }
 
-export async function getListingRow(env: Env, id: number) {
-  return env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first<ListingRow>();
+export async function getListingRow({ env, store }: Ctx, id: number) {
+  return env.DB.prepare('SELECT * FROM listings WHERE id = ? AND store_id = ?').bind(id, store.id).first<ListingRow>();
 }
 
-export async function getFacets(env: Env): Promise<Facets> {
-  const fam = await env.DB.prepare(
-    `SELECT family, COUNT(*) AS count, MAX(created_at) AS latest FROM listings
-     WHERE status = 'active' AND family IS NOT NULL GROUP BY family`,
-  ).all<{ family: string; count: number }>();
-  const agg = await env.DB.prepare(
-    `SELECT COUNT(*) AS total, MIN(price_rub) AS pmin, MAX(price_rub) AS pmax FROM listings WHERE status = 'active'`,
-  ).first<{ total: number; pmin: number | null; pmax: number | null }>();
-  const st = await env.DB.prepare(
-    `SELECT DISTINCT storage_gb FROM listings WHERE status = 'active' AND storage_gb IS NOT NULL ORDER BY storage_gb`,
-  ).all<{ storage_gb: number }>();
+export async function getFacets(ctx: Ctx): Promise<Facets> {
+  const { env, store } = ctx;
+  const vis = visibleWhere(store);
+  const models = await env.DB.prepare(
+    `SELECT l.model_id, l.line, l.short, l.title, l.category, COUNT(*) AS count, MIN(l.price) AS min_price FROM listings l
+     WHERE ${vis} AND l.model_id IS NOT NULL GROUP BY l.model_id`,
+  )
+    .bind(store.id)
+    .all<ModelFacet>();
+  const agg = await env.DB.prepare(`SELECT COUNT(*) AS total, MIN(l.price) AS pmin, MAX(l.price) AS pmax FROM listings l WHERE ${vis}`)
+    .bind(store.id)
+    .first<{ total: number; pmin: number | null; pmax: number | null }>();
+  const cats = await env.DB.prepare(`SELECT l.category, COUNT(*) AS count FROM listings l WHERE ${vis} GROUP BY l.category ORDER BY count DESC`)
+    .bind(store.id)
+    .all<{ category: Category; count: number }>();
+  const st = await env.DB.prepare(`SELECT DISTINCT l.storage_gb FROM listings l WHERE ${vis} AND l.storage_gb IS NOT NULL ORDER BY l.storage_gb`)
+    .bind(store.id)
+    .all<{ storage_gb: number }>();
   const cond = await env.DB.prepare(
-    `SELECT condition, COUNT(*) AS c FROM listings WHERE status = 'active' AND condition IS NOT NULL GROUP BY condition ORDER BY c DESC`,
-  ).all<{ condition: string }>();
+    `SELECT l.condition, COUNT(*) AS c FROM listings l WHERE ${vis} AND l.condition IS NOT NULL GROUP BY l.condition ORDER BY c DESC`,
+  )
+    .bind(store.id)
+    .all<{ condition: string }>();
+  const sorted = models.results.sort((a, b) => modelRank(b) - modelRank(a));
   return {
     total: agg?.total ?? 0,
-    families: fam.results.sort((a, b) => familyRank(b.family) - familyRank(a.family)),
+    categories: cats.results.map((c) => ({ ...c, title: CATEGORIES[c.category]?.title ?? c.category })),
+    models: sorted,
+    families: sorted.map((m) => ({ family: m.short, count: m.count })),
     storages: st.results.map((r) => r.storage_gb),
     conditions: cond.results.map((r) => r.condition),
     price_min: agg?.pmin ?? 0,
@@ -144,35 +188,45 @@ export async function getFacets(env: Env): Promise<Facets> {
   };
 }
 
-/** 17 Pro Max выше 17 Pro выше 17 выше 16 Pro Max … — чтобы чипы шли от новых к старым */
-export function familyRank(f: string): number {
-  const num = parseInt(f, 10);
-  const base = Number.isFinite(num) ? num * 10 : { XS: 85, XR: 84, X: 83, SE: 50 }[f.split(' ')[0]] ?? 0;
-  const v = f.replace(/^\S+\s*/, '');
-  const bonus = { 'Pro Max': 4, Pro: 3, Air: 2.5, Plus: 2, '': 1, mini: 0.5, Max: 4 }[v] ?? 0;
-  return base + bonus - (/\de\b/.test(f) ? 0.5 : 0);
+const CATEGORY_ORDER: Category[] = ['phone', 'computer', 'tablet', 'watch', 'audio', 'console', 'other'];
+
+/** Внутри категории — от новых моделей к старым: 17 Pro Max выше 17 Pro выше 17 выше 16 Pro Max */
+export function modelRank(m: { category: Category; short: string; line: string }): number {
+  const cat = (CATEGORY_ORDER.length - CATEGORY_ORDER.indexOf(m.category)) * 10_000;
+  const num = parseFloat(m.short.replace(/^[A-Za-z ]*?(?=\d)/, ''));
+  const base = Number.isFinite(num) ? num * 10 : ({ XS: 85, XR: 84, X: 83, SE: 50 } as Record<string, number>)[m.short.split(' ')[0]] ?? 0;
+  const v = m.short.replace(/^\S+\s*/, '');
+  const bonus = ({ 'Pro Max': 4, Ultra: 4, Pro: 3, Air: 2.5, Plus: 2, '': 1, mini: 0.5, Max: 4 } as Record<string, number>)[v] ?? 0;
+  return cat + base + bonus - (/\de\b/.test(m.short) ? 0.5 : 0);
 }
 
-export async function logEvent(env: Env, type: string, userId: number | null, listingId: number | null = null) {
-  await env.DB.prepare('INSERT INTO events (tg_user_id, type, listing_id, created_at) VALUES (?, ?, ?, ?)')
-    .bind(userId, type, listingId, Math.floor(Date.now() / 1000))
+export async function logEvent(
+  { env, store }: Ctx,
+  type: string,
+  userId: number | null,
+  extra: { listing_id?: number | null; model_id?: string | null; meta?: unknown } = {},
+) {
+  await env.DB.prepare('INSERT INTO events (store_id, tg_user_id, type, listing_id, model_id, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .bind(store.id, userId, type, extra.listing_id ?? null, extra.model_id ?? null, extra.meta ? JSON.stringify(extra.meta) : null, now())
     .run();
 }
 
-export async function upsertUser(env: Env, u: { id: number; username?: string; first_name?: string }) {
+export async function upsertUser({ env }: Ctx, u: { id: number; username?: string; first_name?: string }) {
   await env.DB.prepare(
     `INSERT INTO users (tg_user_id, username, first_name, updated_at) VALUES (?, ?, ?, ?)
      ON CONFLICT (tg_user_id) DO UPDATE SET username = excluded.username, first_name = excluded.first_name, updated_at = excluded.updated_at`,
   )
-    .bind(u.id, u.username ?? null, u.first_name ?? null, Math.floor(Date.now() / 1000))
+    .bind(u.id, u.username ?? null, u.first_name ?? null, now())
     .run();
 }
 
-export async function listSubscriptions(env: Env, userId: number): Promise<Subscription[]> {
+export async function listSubscriptions({ env, store }: Ctx, userId: number): Promise<Subscription[]> {
   const { results } = await env.DB.prepare(
-    'SELECT id, family, storage_gb, max_price, created_at FROM subscriptions WHERE tg_user_id = ? AND active = 1 ORDER BY created_at DESC',
+    `SELECT s.id, s.model_id, s.title, s.storage_gb, s.max_price, s.created_at,
+       COALESCE((SELECT short FROM listings l WHERE l.store_id = s.store_id AND l.model_id = s.model_id LIMIT 1), s.title) AS family
+     FROM subscriptions s WHERE s.store_id = ? AND s.tg_user_id = ? AND s.active = 1 ORDER BY s.created_at DESC`,
   )
-    .bind(userId)
+    .bind(store.id, userId)
     .all<Subscription>();
   return results;
 }

@@ -1,7 +1,11 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { parsePost, parseModel, isListingPost } from './parser';
-import { parseFeed } from './scrape';
+import { parsePost } from '@vitrina/core/parse';
+import { parseFeed } from '@vitrina/core/scrape';
+import profile from './profile.json';
+
+/** Регрессия: посты, на которых собирался прототип, разбираются не хуже, чем раньше */
+const parse = (text: string) => parsePost(text, profile as never);
 
 const POST_1666 = `📱 iPhone 16 128GB
 #АКТУАЛЬНО_RaXi
@@ -40,23 +44,19 @@ SIM + eSIM
 Купить: @Raxi_Apple
 Отзывы`;
 
-describe('parsePost — примеры из ТЗ', () => {
+describe('RaXi — примеры из ТЗ', () => {
   it('пост 1666', () => {
-    const p = parsePost(POST_1666);
-    expect(p).toMatchObject({
-      category: 'iphone',
-      family: '16',
+    const p = parse(POST_1666);
+    expect(p).toMatchObject({ category: 'phone', status: 'active', status_source: 'marker', price: 43990, parse_ok: true });
+    expect(p.model).toMatchObject({ id: 'iphone-16', short: '16', title: 'iPhone 16' });
+    expect(p.attrs).toEqual({
       storage_gb: 128,
-      status: 'active',
-      condition: 'Отличное',
-      sim: 'SIM + eSIM',
-      has_physical_sim: true,
       battery_pct: 88,
-      ios: null,
+      sim: 'SIM + eSIM',
+      physical_sim: true,
+      condition: 'Отличное',
       kit: 'Полный комплект',
       full_kit: true,
-      price_rub: 43990,
-      parse_ok: true,
     });
     expect(p.pluses).not.toContain('Акб 88%');
     expect(p.pluses).toContain('Оригинальный провод');
@@ -64,54 +64,39 @@ describe('parsePost — примеры из ТЗ', () => {
   });
 
   it('пост 1672', () => {
-    const p = parsePost(POST_1672);
-    expect(p).toMatchObject({
-      family: '15 Pro Max',
+    const p = parse(POST_1672);
+    expect(p.model?.short).toBe('15 Pro Max');
+    expect(p).toMatchObject({ price: 49990, parse_ok: true });
+    expect(p.attrs).toMatchObject({
       storage_gb: 256,
       condition: 'Идеал',
       battery_pct: 85,
-      ios: '18.4',
+      os_version: '18.4',
       kit: 'телефон, блок, провод',
       full_kit: false,
-      price_rub: 49990,
-      parse_ok: true,
     });
     expect(p.pluses.some((s) => /ios/i.test(s))).toBe(false);
     expect(p.nuances).toEqual(['Комплект: телефон, блок, провод']);
   });
 
   it('проданный пост без хэштега → sold', () => {
-    const p = parsePost('❌ Продано ❌\n\n' + POST_1666.replace('#АКТУАЛЬНО_RaXi\n', ''));
+    const p = parse('❌ Продано ❌\n\n' + POST_1666.replace('#АКТУАЛЬНО_RaXi\n', ''));
     expect(p.status).toBe('sold');
+    expect(p.status_source).toBe('marker');
     expect(p.nuances).toEqual(['Следы от чехла по бокам']);
-    expect(isListingPost('❌ Продано ❌')).toBe(false);
-  });
-});
-
-describe('parseModel', () => {
-  it.each([
-    ['iPhone 16 Pro 512GB', '16 Pro'],
-    ['iPhone 16e 128GB', '16e'],
-    ['iPhone SE 64GB', 'SE'],
-    ['iPhone XR 128GB', 'XR'],
-    ['iPhone 13 mini', '13 mini'],
-    ['iPhone 17 Air 256GB', '17 Air'],
-    ['iPhone 15 Plus', '15 Plus'],
-    ['iphone 14 pro max', '14 Pro Max'],
-  ])('%s → %s', (line, family) => {
-    expect(parseModel(line)?.family).toBe(family);
+    expect(parse('❌ Продано ❌').status).toBe('not_listing');
   });
 
   it('1TB → 1024', () => {
-    expect(parsePost('📱 iPhone 15 Pro Max 1TB\n💰 90 000 ₽').storage_gb).toBe(1024);
+    expect(parse('📱 iPhone 15 Pro Max 1TB\n💰 90 000 ₽').attrs.storage_gb).toBe(1024);
   });
 
   it('eSIM-only → нет физической SIM', () => {
-    expect(parsePost('📱 iPhone 17 Pro 256GB\neSIM\n💰 1 ₽').has_physical_sim).toBe(false);
+    expect(parse('📱 iPhone 17 Pro 256GB\neSIM\n💰 1 000 ₽').attrs.physical_sim).toBe(false);
   });
 });
 
-describe('реальные посты канала', () => {
+describe('RaXi — реальные посты канала', () => {
   const dir = new URL('./fixtures/', import.meta.url);
   const posts = readdirSync(dir)
     .filter((f) => f.endsWith('.html'))
@@ -123,10 +108,10 @@ describe('реальные посты канала', () => {
   });
 
   it.each(posts.map((p) => [p.msg_id, p] as const))('пост %i разобран', (_, post) => {
-    const p = parsePost(post.text);
+    const p = parse(post.text);
     expect(p.parse_ok).toBe(true);
-    expect(p.battery_pct).toBeGreaterThan(50);
-    expect(p.condition).toBeTruthy();
+    expect(p.attrs.battery_pct).toBeGreaterThan(50);
+    expect(p.attrs.condition).toBeTruthy();
     expect(post.media.length).toBeGreaterThan(0);
     expect(p.status).toBe(post.text.includes('#АКТУАЛЬНО_RaXi') ? 'active' : 'sold');
   });

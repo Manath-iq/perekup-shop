@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { Listing, MediaItem } from '@vitrina/core/types';
-import { formatPrice, formatStorage } from '@vitrina/core/parser';
+import { formatPrice, formatStorage } from '@vitrina/core/format';
 import { batteryTone, isNew } from '../filters';
 import { api } from '../api';
 import { haptic, inTelegram, tg, openTgLink } from '../tg';

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { Facets, Listing } from '@vitrina/core/types';
 import { api, type StoreInfo } from './api';
 import { EMPTY, type Filters } from './filters';
-import { copyText, haptic, inTelegram, openTgLink, startParam, tg } from './tg';
+import { copyText, haptic, inTelegram, openTgLink, startListing, tg } from './tg';
 import { Catalog } from './components/Catalog';
 import { FilterSheet } from './components/FilterSheet';
 import { Detail } from './components/Detail';
@@ -30,10 +30,7 @@ export function App() {
   const [filters, setFiltersRaw] = useState<Filters>(loadFilters);
   const [sheet, setSheet] = useState(false);
   const [tab, setTab] = useState<Tab>('catalog');
-  const [detailId, setDetailId] = useState<number | null>(() => {
-    const m = startParam.match(/(\d+)/);
-    return m ? +m[1] : null;
-  });
+  const [detailId, setDetailId] = useState<number | null>(startListing);
   const [subPreset, setSubPreset] = useState<string | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimer = useRef<number>();
@@ -136,7 +133,7 @@ export function App() {
             facets={facets}
             filters={filters}
             setFilters={setFilters}
-            storeName={store?.name ?? 'RaXi Store'}
+            storeName={store?.name ?? 'Каталог'}
             error={error}
             onOpen={(l) => (haptic.tap(), setDetailId(l.id))}
             onOpenFilters={() => setSheet(true)}

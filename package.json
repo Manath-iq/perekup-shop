@@ -2,14 +2,19 @@
   "name": "vitrina",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*", "apps/*"],
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
     "dev:app": "vite --config apps/miniapp/vite.config.ts",
     "dev:worker": "wrangler dev --config apps/worker/wrangler.jsonc",
     "build": "vite build --config apps/miniapp/vite.config.ts",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json && tsc -p apps/worker/tsconfig.json",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run build",
+    "cli": "tsx scripts/cli.ts",
+    "db:migrate:local": "wrangler d1 migrations apply vitrina-dev-db --local --config apps/worker/wrangler.jsonc"
   },
   "dependencies": {
     "grammy": "^1.46.0",
@@ -21,6 +26,7 @@
     "@types/node": "^24.0.0",
     "lottie-web": "^5.13.0",
     "preact": "^10.29.8",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vite": "^8.3.5",
     "vitest": "^4.1.11",

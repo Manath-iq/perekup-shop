@@ -1,5 +1,5 @@
 import type { Listing } from '@vitrina/core/types';
-import { formatPrice, formatStorage } from '@vitrina/core/parser';
+import { formatPrice, formatStorage } from '@vitrina/core/format';
 import { batteryTone, isNew } from '../filters';
 import { Emoji } from './Emoji';
 import { Img } from './Img';

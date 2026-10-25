@@ -1,3 +1,5 @@
+import { parseStartParam } from '@vitrina/core/store';
+
 /** Тонкая обёртка над Telegram WebApp SDK с запасными вариантами для обычного браузера */
 
 type Haptic = 'light' | 'medium' | 'heavy' | 'rigid' | 'soft';
@@ -48,7 +50,11 @@ const w = (window as unknown as { Telegram?: { WebApp?: WebApp } }).Telegram?.We
 export const inTelegram = !!w?.initData;
 export const tg = w;
 export const initData = w?.initData ?? '';
-export const startParam = w?.initDataUnsafe.start_param ?? new URLSearchParams(location.search).get('l') ?? '';
+const query = new URLSearchParams(location.search);
+const start = parseStartParam(w?.initDataUnsafe.start_param);
+/** Магазин (нужен демо-деплою, где на одном боте много магазинов) и карточка, с которой открыли мини-апп */
+export const storeId = start.store ?? query.get('s') ?? '';
+export const startListing = start.listing ?? (Number(query.get('l')) || null);
 export const supports = (v: string) => !!w && inTelegram && w.isVersionAtLeast(v);
 
 export function initTelegram() {

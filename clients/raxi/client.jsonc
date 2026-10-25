@@ -1,0 +1,15 @@
+// RaXi Store — первый клиент, на его канале собран прототип.
+{
+  "slug": "raxi",
+  "name": "RaXi Store",
+  "channel": "apple_raxi",
+  "seller": "Raxi_Apple",
+  "reviewsChannel": "otzv_RaXiStore",
+  "theme": { "preset": "graphite", "accent": "#ff5b1f" },
+  "about": {
+    "city": "Москва",
+    "delivery": "Встреча в городе или доставка СДЭК по России",
+    "warranty": "Гарантия магазина 14 дней на все устройства",
+    "payment": "Наличные, перевод, рассрочка по договорённости"
+  }
+}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { Subscription } from '@vitrina/core/types';
-import { formatPrice, formatStorage } from '@vitrina/core/parser';
+import { formatPrice, formatStorage } from '@vitrina/core/format';
 import { api } from '../api';
 import { ALL_FAMILIES, STORAGE_OPTIONS } from '../filters';
 import { haptic, inTelegram, requestWriteAccess } from '../tg';

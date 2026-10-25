@@ -9,13 +9,12 @@
     "directory": "../miniapp/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/media/*", "/bot", "/admin/*"]
+    "run_worker_first": ["/api/*", "/media/*", "/bot", "/admin/*", "/cron"]
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "vitrina-dev-db", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
   ],
   "kv_namespaces": [{ "binding": "MEDIA", "id": "00000000000000000000000000000000" }],
-  "ai": { "binding": "AI" },
   "triggers": { "crons": ["0 * * * *"] },
   "vars": {
     "BOT_USERNAME": "perekup_shop_bot",

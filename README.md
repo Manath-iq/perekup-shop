@@ -8,11 +8,11 @@ Telegram-магазин для перекупщиков техники. Прод
 
 | Папка | Что внутри |
 | --- | --- |
-| `packages/core` | Разбор постов, разбор ленты `t.me/s`, типы. Без зависимостей, работает в Workers и Node |
+| `packages/core` | Словарь моделей и категорий, движок разбора с профилем, Gemini-фолбэк, разбор ленты `t.me/s`, типы. Без зависимостей, работает в Workers и Node |
 | `apps/worker` | Cloudflare Worker: бот (grammY), API (Hono), cron, раздача мини-аппа и медиа |
 | `apps/miniapp` | Мини-апп на Preact + Vite |
-| `clients/<slug>` | Конфиг клиента и профиль разбора (появится на этапе 1) |
-| `scripts` | Импорт ленты, выгрузка анимированных эмодзи |
+| `clients/<slug>` | `client.jsonc` (магазин, контакты, оформление), `profile.json` (правила разбора), фикстуры и тесты на реальных постах |
+| `scripts/cli.ts` | CLI: отчёт по разбору канала, заливка магазина, импорт, перепарсинг |
 
 Основа взята из прототипа RaXi Store (`~/myAI/iphone_market`).
 
@@ -23,6 +23,21 @@ npm install
 npm run check       # typecheck + тесты + сборка мини-аппа
 npm run dev:worker  # wrangler dev на :8787, секреты в apps/worker/.dev.vars
 npm run dev:app     # мини-апп на vite, /api проксируется на :8787
+npm run db:migrate:local
 ```
+
+CLI (адрес воркера — `VITRINA_URL`, ключ — `ADMIN_API_KEY`, по умолчанию локальный dev):
+
+```bash
+npm run cli -- profile:test raxi        # разобрать ленту канала и показать, что разобралось неуверенно
+npm run cli -- profile:test some_channel # то же для любого публичного канала с профилем по умолчанию
+npm run cli -- store:push raxi          # залить clients/raxi в воркер
+npm run cli -- import raxi 3            # импорт трёх страниц ленты
+npm run cli -- reparse raxi             # перепарсить всё после правки profile.json
+```
+
+## Как устроен разбор
+
+Пост → нормализация → модель по словарю (`catalog.ts`, сленг вроде «15 про макс» и «с24 ультра») → характеристики по категории → статус по меткам из профиля → уверенность. Если не хватает модели, цены или обязательных полей, пост дополняет Gemini (ответ кэшируется по хэшу текста), а карточка ждёт «Всё верно» от продавца. Исходный текст каждого поста лежит в `posts`, поэтому после правки профиля всё перепарсивается командой `reparse`.
 
 Секреты не коммитятся: локально `.env` (CLI) и `apps/worker/.dev.vars` (wrangler dev), в бою — `wrangler secret put`. Образец — `.env.example`.

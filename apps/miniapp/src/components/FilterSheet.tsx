@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { Facets, Listing } from '@vitrina/core/types';
-import { formatPrice, formatStorage } from '@vitrina/core/parser';
+import { formatPrice, formatStorage } from '@vitrina/core/format';
 import { applyFilters, EMPTY, type Filters } from '../filters';
 import { haptic } from '../tg';
 import { IconClose } from '../icons';

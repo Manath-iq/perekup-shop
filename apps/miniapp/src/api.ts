@@ -1,10 +1,10 @@
 import type { Facets, Listing, Subscription } from '@vitrina/core/types';
-import { initData } from './tg';
+import { initData, storeId } from './tg';
 
 async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
     ...init,
-    headers: { 'content-type': 'application/json', 'x-init-data': initData, ...(init.headers ?? {}) },
+    headers: { 'content-type': 'application/json', 'x-init-data': initData, ...(storeId ? { 'x-store': storeId } : {}), ...(init.headers ?? {}) },
   });
   if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
   return res.json() as Promise<T>;

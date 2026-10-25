@@ -1,45 +1,31 @@
-import type { ParsedPost } from '@vitrina/core/types';
-import { parseModel } from '@vitrina/core/parser';
+import { llmParsePost, mergeLlm, type LlmPost } from '@vitrina/core/llm';
+import type { ParseResult } from '@vitrina/core/parse';
 import type { Env } from './env';
+import { now } from './env';
 
-const SCHEMA = {
-  type: 'object',
-  properties: {
-    model: { type: 'string', description: 'Модель, например "iPhone 15 Pro Max"' },
-    storage_gb: { type: 'integer', description: 'Память в ГБ, 1TB = 1024' },
-    price_rub: { type: 'integer', description: 'Цена в рублях целым числом' },
-    battery_pct: { type: 'integer' },
-    condition: { type: 'string' },
-  },
-  required: ['model', 'storage_gb', 'price_rub'],
-};
+async function sha256(text: string) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
 
-/** Запасной разбор: вызывается только когда регулярки не нашли модель, память или цену */
-export async function llmFallback(env: Env, text: string, parsed: ParsedPost): Promise<ParsedPost> {
+/**
+ * Запасной разбор через Gemini — только когда правила не нашли модель, цену или обязательные поля.
+ * Ответ кэшируется по хэшу текста; результат всё равно уходит продавцу на подтверждение.
+ */
+export async function llmFallback(env: Env, text: string, parsed: ParseResult, allowCall = true): Promise<ParseResult> {
   try {
-    const out = (await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as keyof AiModels, {
-      messages: [
-        { role: 'system', content: 'Извлеки из объявления о продаже телефона поля строго по JSON-схеме. Если поля нет — не выдумывай.' },
-        { role: 'user', content: text },
-      ],
-      response_format: { type: 'json_schema', json_schema: SCHEMA },
-    } as never)) as { response?: unknown };
-    const data = (typeof out.response === 'string' ? JSON.parse(out.response) : out.response) as Record<string, unknown>;
-    const model = typeof data.model === 'string' ? parseModel(data.model) : null;
-    return {
-      ...parsed,
-      category: model ? 'iphone' : parsed.category,
-      model_raw: parsed.model_raw ?? (data.model as string) ?? null,
-      family: parsed.family ?? model?.family ?? null,
-      storage_gb: parsed.storage_gb ?? (Number(data.storage_gb) || null),
-      price_rub: parsed.price_rub ?? (Number(data.price_rub) || null),
-      battery_pct: parsed.battery_pct ?? (Number(data.battery_pct) || null),
-      condition: parsed.condition ?? ((data.condition as string) || null),
-      // результат модели всё равно идёт продавцу на подтверждение
-      parse_ok: false,
-    };
+    const hash = await sha256(text);
+    const cached = await env.DB.prepare('SELECT result FROM llm_cache WHERE hash = ?').bind(hash).first<{ result: string }>();
+    let llm: LlmPost;
+    if (cached) llm = JSON.parse(cached.result);
+    else {
+      if (!allowCall || !env.GEMINI_API_KEY) return parsed;
+      llm = await llmParsePost(text, { apiKey: env.GEMINI_API_KEY });
+      await env.DB.prepare('INSERT OR REPLACE INTO llm_cache (hash, result, created_at) VALUES (?, ?, ?)').bind(hash, JSON.stringify(llm), now()).run();
+    }
+    return mergeLlm(parsed, llm);
   } catch (e) {
-    console.error('llm fallback failed', e);
+    console.error('llm fallback failed', String(e));
     return parsed;
   }
 }

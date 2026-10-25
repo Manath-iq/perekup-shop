@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "mode": "active_marker",
+  "activeMarkers": ["#АКТУАЛЬНО_RaXi"],
+  "soldMarkers": ["продано"],
+  "reservedMarkers": ["бронь"],
+  "ignoreMarkers": [],
+  "priceMarkers": ["💰"],
+  "plusMarkers": ["✅", "☑", "✔"],
+  "nuanceMarkers": ["✖", "❌", "⚠", "❗"],
+  "conditionLabels": ["Состояние"],
+  "defaultBrand": "apple",
+  "threshold": 0.75
+}
