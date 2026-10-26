@@ -3,7 +3,8 @@ import type { Listing } from '@vitrina/core/types';
 export type Sort = 'new' | 'cheap' | 'expensive' | 'battery';
 
 export interface Filters {
-  family: string | null;
+  category: string | null;
+  model_id: string | null;
   storages: number[];
   priceMin: number | null;
   priceMax: number | null;
@@ -14,7 +15,8 @@ export interface Filters {
 }
 
 export const EMPTY: Filters = {
-  family: null,
+  category: null,
+  model_id: null,
   storages: [],
   priceMin: null,
   priceMax: null,
@@ -26,12 +28,12 @@ export const EMPTY: Filters = {
 
 export const SORT_LABELS: Record<Sort, string> = {
   new: 'Сначала новые',
-  cheap: 'Дешевле',
-  expensive: 'Дороже',
+  cheap: 'Сначала дешевле',
+  expensive: 'Сначала дороже',
   battery: 'АКБ выше',
 };
 
-/** Сколько фильтров из листа включено — для бейджа на кнопке */
+/** Сколько фильтров из шторки включено — для бейджа на кнопке */
 export const sheetCount = (f: Filters) =>
   (f.storages.length ? 1 : 0) +
   (f.priceMin !== null || f.priceMax !== null ? 1 : 0) +
@@ -39,33 +41,47 @@ export const sheetCount = (f: Filters) =>
   (f.conditions.length ? 1 : 0) +
   (f.sim !== 'any' ? 1 : 0);
 
-export function applyFilters(items: Listing[], f: Filters, ignoreFamily = false): Listing[] {
-  const out = items.filter(
-    (l) =>
-      (ignoreFamily || !f.family || l.family === f.family) &&
-      (!f.storages.length || (l.storage_gb !== null && f.storages.includes(l.storage_gb))) &&
-      (f.priceMin === null || (l.price_rub ?? 0) >= f.priceMin) &&
-      (f.priceMax === null || (l.price_rub ?? 0) <= f.priceMax) &&
-      (!f.batteryMin || (l.battery_pct ?? 0) >= f.batteryMin) &&
-      (!f.conditions.length || (l.condition !== null && f.conditions.includes(l.condition))) &&
-      (f.sim === 'any' || (f.sim === 'physical' ? l.has_physical_sim === true : l.has_physical_sim === false)),
-  );
-  const by: Record<Sort, (a: Listing, b: Listing) => number> = {
-    new: (a, b) => b.created_at - a.created_at,
-    cheap: (a, b) => (a.price_rub ?? 0) - (b.price_rub ?? 0),
-    expensive: (a, b) => (b.price_rub ?? 0) - (a.price_rub ?? 0),
-    battery: (a, b) => (b.battery_pct ?? 0) - (a.battery_pct ?? 0),
-  };
-  return out.sort(by[f.sort]);
+const BY: Record<Sort, (a: Listing, b: Listing) => number> = {
+  new: (a, b) => b.created_at - a.created_at,
+  cheap: (a, b) => (a.price ?? Infinity) - (b.price ?? Infinity),
+  expensive: (a, b) => (b.price ?? 0) - (a.price ?? 0),
+  battery: (a, b) => (b.attrs.battery_pct ?? 0) - (a.attrs.battery_pct ?? 0),
+};
+
+export function applyFilters(items: Listing[], f: Filters, skip: { model?: boolean } = {}): Listing[] {
+  const out = items.filter((l) => {
+    const a = l.attrs;
+    return (
+      (!f.category || l.category === f.category) &&
+      (skip.model || !f.model_id || l.model_id === f.model_id) &&
+      (!f.storages.length || (a.storage_gb !== undefined && f.storages.includes(a.storage_gb))) &&
+      (f.priceMin === null || (l.price ?? 0) >= f.priceMin) &&
+      (f.priceMax === null || (l.price ?? 0) <= f.priceMax) &&
+      (!f.batteryMin || (a.battery_pct ?? 0) >= f.batteryMin) &&
+      (!f.conditions.length || (a.condition !== undefined && f.conditions.includes(a.condition))) &&
+      (f.sim === 'any' || (f.sim === 'physical' ? a.physical_sim === true : a.physical_sim === false))
+    );
+  });
+  return out.sort(BY[f.sort]);
 }
+
+export const sortItems = (items: Listing[], sort: Sort) => [...items].sort(BY[sort]);
 
 export const isNew = (l: Listing) => Date.now() / 1000 - l.created_at < 48 * 3600;
 
-export function batteryTone(pct: number | null): 'good' | 'mid' | 'low' {
-  if (pct === null) return 'mid';
-  if (pct >= 90) return 'good';
-  if (pct >= 85) return 'mid';
-  return 'low';
+/** Цвет точки АКБ: зелёный от 85%, жёлтый от 80%, дальше нейтральный */
+export function batteryTone(pct: number | undefined): string {
+  if (pct === undefined) return 'var(--muted)';
+  if (pct >= 85) return '#3ddc84';
+  if (pct >= 80) return '#f5c542';
+  return '#a1a1aa';
+}
+
+export function batteryWord(pct: number): string {
+  if (pct >= 90) return 'Почти как новый';
+  if (pct >= 85) return 'Отличная ёмкость';
+  if (pct >= 80) return 'Хорошая ёмкость';
+  return 'Стоит учесть';
 }
 
 export function plural(n: number, one: string, few: string, many: string) {
@@ -76,11 +92,26 @@ export function plural(n: number, one: string, few: string, many: string) {
   return many;
 }
 
-/** Все модели для подписки — даже те, которых сейчас нет */
-export const ALL_FAMILIES = [
-  '17 Pro Max', '17 Pro', '17 Air', '17', '16 Pro Max', '16 Pro', '16 Plus', '16', '16e',
-  '15 Pro Max', '15 Pro', '15 Plus', '15', '14 Pro Max', '14 Pro', '14 Plus', '14',
-  '13 Pro Max', '13 Pro', '13', '13 mini', '12 Pro Max', '12 Pro', '12', '12 mini', '11 Pro Max', '11 Pro', '11', 'SE',
-];
+export function ago(ts: number): string {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 90) return 'только что';
+  if (s < 3600) return `${Math.round(s / 60)} мин назад`;
+  if (s < 86400) return `${Math.round(s / 3600)} ч назад`;
+  if (s < 2 * 86400) return 'вчера';
+  return `${Math.round(s / 86400)} ${plural(Math.round(s / 86400), 'день', 'дня', 'дней')} назад`;
+}
 
-export const STORAGE_OPTIONS = [64, 128, 256, 512, 1024];
+/** «128 ГБ · Отличное» — подпись под названием в сетке */
+export function cardMeta(l: Listing): string {
+  const a = l.attrs;
+  const gb = a.storage_gb ? (a.storage_gb >= 1024 ? `${a.storage_gb / 1024} ТБ` : `${a.storage_gb} ГБ`) : null;
+  return [gb, a.chip, a.condition].filter(Boolean).join(' · ');
+}
+
+export const initials = (name: string) =>
+  name
+    .split(/\s+/)
+    .map((w) => w[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();

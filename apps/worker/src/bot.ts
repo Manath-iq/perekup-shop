@@ -7,7 +7,7 @@ import { adminIds, now } from './env';
 import type { ListingRow } from './db';
 import { addMedia, downloadCovers, setStatus, upsertPost } from './ingest';
 import { pickPhotoSizes } from './media';
-import { cardUrl, notifySubscribers, sendAdminPreview, statsText, storeUrl } from './notify';
+import { cardUrl, notifyPriceDrop, notifySubscribers, sendAdminPreview, statsText, storeUrl } from './notify';
 import { getStore, getStoreByChannel, type Ctx } from './store';
 
 interface Deps {
@@ -76,6 +76,7 @@ export function createBot({ env, origin, waitUntil }: Deps) {
         msg_id: msg.message_id, text, media_group_id: group,
         date: edited ? msg.date : msg.date || now(), post_url: postUrl(msg.chat, msg.message_id),
       });
+      if (res?.priceChanged && res.oldPrice) waitUntil(notifyPriceDrop(ctx, origin, res.listing, res.oldPrice));
       if (res?.created) {
         const listing = res.listing;
         waitUntil(

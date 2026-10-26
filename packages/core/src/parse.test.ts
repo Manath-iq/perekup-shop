@@ -77,6 +77,13 @@ describe('разбор постов в разных шаблонах', () => {
     expect(p.attrs.storage_gb).toBe(128);
   });
 
+  it('«отдам за 70 тыс» рядом с АКБ в процентах', () => {
+    const p = parsePost('Продаю самсунг с24 ультра, 512 памяти, батарея держит отлично (94%), отдам за 70 тыс');
+    expect(p.model?.id).toBe('galaxy-s24-ultra');
+    expect(p.price).toBe(70000);
+    expect(p.attrs.storage_gb).toBe(512);
+  });
+
   it('цена с ₽ без метки, циклы и АКБ перед словом', () => {
     const p = parsePost('📱 Samsung Galaxy S24 Ultra 12/512GB Titanium Black\n100% акб, 45 циклов\n94 990 ₽');
     expect(p.model?.id).toBe('galaxy-s24-ultra');

@@ -187,6 +187,7 @@ export async function getFacets(ctx: Ctx): Promise<Facets> {
   )
     .bind(store.id)
     .all<{ condition: string }>();
+  const synced = await env.DB.prepare('SELECT MAX(updated_at) AS t FROM listings WHERE store_id = ?').bind(store.id).first<{ t: number | null }>();
   const sorted = models.results.sort((a, b) => modelRank(b) - modelRank(a));
   return {
     total: agg?.total ?? 0,
@@ -197,6 +198,7 @@ export async function getFacets(ctx: Ctx): Promise<Facets> {
     conditions: cond.results.map((r) => r.condition),
     price_min: agg?.pmin ?? 0,
     price_max: agg?.pmax ?? 0,
+    synced_at: synced?.t ?? null,
   };
 }
 
@@ -241,4 +243,15 @@ export async function listSubscriptions({ env, store }: Ctx, userId: number): Pr
     .bind(store.id, userId)
     .all<Subscription>();
   return results;
+}
+
+/** Избранное покупателя: и проданные тоже — чтобы было видно, что ушло */
+export async function listFavorites({ env, store }: Ctx, userId: number): Promise<Listing[]> {
+  const { results } = await env.DB.prepare(
+    `${LISTING_SELECT} JOIN favorites f ON f.listing_id = l.id AND f.store_id = l.store_id
+     WHERE l.store_id = ? AND f.tg_user_id = ? AND l.status != 'hidden' ORDER BY f.created_at DESC`,
+  )
+    .bind(store.id, userId)
+    .all<ListingRow>();
+  return results.map(toListing);
 }

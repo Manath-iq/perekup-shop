@@ -1,88 +1,91 @@
 import type { StoreInfo } from '../api';
+import { initials } from '../filters';
 import { haptic, openTgLink } from '../tg';
-import { IconChevron } from '../icons';
-import { Emoji, type EmojiName } from './Emoji';
+import { IconChat, IconChevron, IconPin, IconShield, IconTruck, IconWallet } from '../icons';
+import { Emoji } from './Emoji';
 
 export function About({ store }: { store: StoreInfo | null }) {
-  if (!store) return <div class="screen page" />;
+  if (!store) return <div class="page" />;
   const { about, reviews } = store;
-  const rows: [EmojiName, string, string][] = [
-    ['map', 'Город', about.city],
-    ['car', 'Доставка', about.delivery],
-    ['check', 'Гарантия', about.warranty],
-    ['money', 'Оплата', about.payment],
-  ];
+  const rows = [
+    [IconPin, 'Город', about.city],
+    [IconTruck, 'Доставка', about.delivery],
+    [IconShield, 'Гарантия', about.warranty],
+    [IconWallet, 'Оплата', about.payment],
+  ] as const;
+  const filled = rows.filter(([, , v]) => v);
   return (
-    <div class="screen page">
-      <div class="page-hero">
-        <div class="brand-mark big" aria-hidden="true">
-          <span>R</span>
+    <div class="page">
+      <div class="glow" aria-hidden="true" />
+      <div class="stack" style={{ alignItems: 'center', textAlign: 'center', gap: '12px', paddingTop: '12px' }}>
+        <div class="avatar" style={{ width: '84px', height: '84px', fontSize: '28px' }}>
+          {store.avatar ? <img src={store.avatar} alt="" /> : initials(store.name)}
         </div>
-        <h1>{store.name}</h1>
-        <p>Техника с проверкой. У каждого товара — честное описание и реальные фото.</p>
+        <h1 class="d-title">{store.name}</h1>
+        <div class="muted" style={{ maxWidth: '300px' }}>
+          Только то, что есть в наличии. У каждого товара — честное описание и реальные фото.
+        </div>
       </div>
 
+      {filled.length > 0 && (
+        <div class="stack" style={{ gap: '12px' }}>
+          <div class="between">
+            <div class="label">О магазине</div>
+            {about.demo && <span class="tag warn sm">демо-текст</span>}
+          </div>
+          <div class="panel list">
+            {filled.map(([Icon, label, value]) => (
+              <div class="info-row">
+                <Icon size={20} />
+                <span style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                  <span class="muted" style={{ fontSize: '13px' }}>
+                    {label}
+                  </span>
+                  <span style={{ fontSize: '15px', lineHeight: 1.4 }}>{value}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {reviews && (
-        <section class="group reviews">
-          <button class="reviews-head" onClick={() => (haptic.tap(), openTgLink(reviews.url))}>
-            <span class="row-icon star">
-              <Emoji name="star" size={24} />
+        <div class="stack" style={{ gap: '12px' }}>
+          <button class="between" style={{ textAlign: 'left' }} onClick={() => (haptic.tap(), openTgLink(reviews.url))}>
+            <span class="row">
+              <Emoji name="star" size={28} />
+              <span style={{ display: 'flex', flexDirection: 'column' }}>
+                <span class="h2">Отзывы</span>
+                {reviews.subscribers && (
+                  <span class="muted" style={{ fontSize: '13px' }}>
+                    {reviews.subscribers}
+                  </span>
+                )}
+              </span>
             </span>
-            <div>
-              <b>Отзывы покупателей</b>
-              {reviews.subscribers && <span class="muted">{reviews.subscribers}</span>}
-            </div>
-            <IconChevron size={16} />
+            <IconChevron size={18} />
           </button>
           {reviews.photos.length > 0 && (
-            <div class="review-strip">
+            <div class="reviews">
               {reviews.photos.map((src) => (
-                <button class="review-shot" onClick={() => openTgLink(reviews.url)}>
-                  <img src={src} alt="Отзыв" loading="lazy" />
+                <button onClick={() => openTgLink(reviews.url)} aria-label="Открыть отзывы">
+                  <img src={src} alt="" loading="lazy" />
                 </button>
               ))}
             </div>
           )}
-        </section>
+        </div>
       )}
 
-      <section class="group">
-        <h3>
-          О магазине {about.demo && <span class="req">демо-текст</span>}
-        </h3>
-        <ul class="list info">
-          {rows.map(([icon, label, value]) => (
-            <li>
-              <Emoji name={icon} size={28} />
-              <div>
-                <span class="muted">{label}</span>
-                {value}
-              </div>
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section class="group links">
-        <button class="row" onClick={() => openTgLink(`https://t.me/${store.channel}`)}>
-          <span class="row-icon">
-            <Emoji name="megaphone" size={24} />
-          </span>
-          Канал @{store.channel}
-          <span class="row-tail">
-            <IconChevron size={16} />
-          </span>
-        </button>
-        <button class="row" onClick={() => openTgLink(`https://t.me/${store.seller}`)}>
-          <span class="row-icon">
-            <Emoji name="chat" size={24} />
-          </span>
+      <div class="stack" style={{ gap: '10px' }}>
+        <button class="btn primary block" onClick={() => openTgLink(`https://t.me/${store.seller}`)}>
+          <IconChat size={20} />
           Написать продавцу
-          <span class="row-tail">
-            <IconChevron size={16} />
-          </span>
         </button>
-      </section>
+        <button class="btn ghost block" onClick={() => openTgLink(`https://t.me/${store.channel}`)}>
+          Канал @{store.channel}
+        </button>
+      </div>
     </div>
   );
 }

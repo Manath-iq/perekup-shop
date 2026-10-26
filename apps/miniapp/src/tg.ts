@@ -36,6 +36,8 @@ interface WebApp {
   requestWriteAccess(cb?: (ok: boolean) => void): void;
   showAlert(msg: string, cb?: () => void): void;
   MainButton: TgButton;
+  /** Bot API 7.10 */
+  SecondaryButton?: TgButton;
   BackButton: TgButton;
   HapticFeedback: {
     impactOccurred(s: Haptic): void;
@@ -64,15 +66,14 @@ export function initTelegram() {
   if (supports('7.7')) w.disableVerticalSwipes?.();
   // во весь экран на телефонах; на десктопе Telegram это окно на весь монитор — там не нужно
   if (supports('8.0') && ['ios', 'android', 'android_x'].includes(w.platform)) w.requestFullscreen?.();
-  const paint = () => {
-    const bg = w.themeParams.secondary_bg_color || w.themeParams.bg_color;
-    if (!bg || !supports('6.1')) return;
-    w.setHeaderColor(bg);
-    w.setBackgroundColor(bg);
-    if (supports('7.10')) w.setBottomBarColor?.(bg);
-  };
-  paint();
-  w.onEvent('themeChanged', paint);
+}
+
+/** Шапка и нижняя панель Telegram — в цвет фона витрины, а не темы Telegram */
+export function paintChrome(bg: string) {
+  if (!w || !supports('6.1')) return;
+  w.setHeaderColor(bg);
+  w.setBackgroundColor(bg);
+  if (supports('7.10')) w.setBottomBarColor?.(bg);
 }
 
 export const haptic = {

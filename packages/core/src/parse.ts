@@ -212,8 +212,8 @@ function extractPrice(lines: string[], profile: ParseProfile): { price: number |
     pick(afterMarker, (l) => isPriceMarker(l) && !/акб|%/iu.test(l)) ??
     // 2. число с валютой
     pick(CURRENCY_RE, () => true) ??
-    // 3. «60к» в любой строке
-    pick(K_RE, (l) => !/акб|%|мм|mm/iu.test(l));
+    // 3. «60к» в любой строке: у суффикса «к/тыс» не бывает процентов, поэтому АКБ в той же строке не мешает
+    pick(K_RE, (l) => !/\d\s*(мм|mm)/iu.test(l));
   if (old === null) {
     // «Было 52 000» без валюты
     for (const l of lines) {

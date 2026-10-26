@@ -4,15 +4,17 @@ import { webhookCallback } from 'grammy';
 import { listingTitle, formatPrice } from '@vitrina/core/format';
 import type { StoreConfig } from '@vitrina/core/store';
 import type { ParseProfile } from '@vitrina/core/profile';
+import { matchModel } from '@vitrina/core/catalog';
 import type { Env } from './env';
-import { now } from './env';
+import { adminIds, now } from './env';
 import { verifyInitData, type TgUser } from './auth';
-import { getFacets, getListing, getListingRow, listSubscriptions, logEvent, queryListings, upsertUser } from './db';
+import { getFacets, getListing, getListingRow, listFavorites, listSubscriptions, logEvent, queryListings, upsertUser, type ListingRow } from './db';
+import { cabinetData } from './cabinet';
 import { handleMedia } from './media';
 import { createBot } from './bot';
-import { sendBuyRequest, sendWeeklyStats } from './notify';
+import { notifySubscribers, sendBuyRequest, sendQuestion, sendWeeklyStats } from './notify';
 import { checkDeleted, importChannel, importReviews, type ReviewsMeta } from './importer';
-import { downloadCovers, purgeSoldMedia, reparse } from './ingest';
+import { downloadCovers, purgeSoldMedia, reparse, setStatus } from './ingest';
 import { listStores, resolveStore, saveStore, type Ctx, type Store } from './store';
 
 type HonoEnv = { Bindings: Env; Variables: { user: TgUser | null; store: Store } };
@@ -44,7 +46,9 @@ app.use('/api/*', async (c, next) => {
   if (!store) return c.json({ error: 'store not found' }, 404);
   c.set('store', store);
   const user = await verifyInitData(c.req.header('x-init-data') ?? '', c.env.BOT_TOKEN);
-  const readOnly = c.req.method === 'GET' && !c.req.path.startsWith('/api/subscriptions');
+  // личные разделы — только с подписью Telegram, даже на демо с открытым чтением
+  const personal = /^\/api\/(subscriptions|favorites|me|cabinet)/.test(c.req.path);
+  const readOnly = c.req.method === 'GET' && !personal;
   if (!user && !(readOnly && c.env.PUBLIC_READ === '1')) return c.json({ error: 'unauthorized' }, 401);
   c.set('user', user);
   await next();
@@ -88,12 +92,19 @@ app.get('/api/store', async (c) => {
     seller: cfg.seller,
     avatar: cfg.avatar ?? null,
     theme: cfg.theme ?? null,
+    bot_username: c.env.BOT_USERNAME,
+    default_brand: store.profile.defaultBrand ?? null,
     about: { city: '', delivery: '', warranty: '', payment: '', ...cfg.about, demo: store.kind === 'demo' },
     reviews,
   });
 });
 
-const EVENT_TYPES = new Set(['app_open', 'card_view', 'subscribe', 'search']);
+app.get('/api/me', (c) => {
+  const user = c.get('user')!;
+  return c.json({ id: user.id, is_admin: adminIds(c.env).includes(user.id) });
+});
+
+const EVENT_TYPES = new Set(['app_open', 'card_view', 'search']);
 app.post('/api/events', async (c) => {
   const user = c.get('user')!;
   const body = await c.req.json<{ type: string; listing_id?: number; model_id?: string; meta?: unknown }>().catch(() => null);
@@ -107,16 +118,24 @@ app.post('/api/events', async (c) => {
 app.post('/api/buy', async (c) => {
   const user = c.get('user')!;
   const ctx = ctxOf(c);
-  const { listing_id } = await c.req.json<{ listing_id: number }>();
+  const { listing_id, kind = 'buy' } = await c.req.json<{ listing_id: number; kind?: 'buy' | 'ask' }>();
   const l = await getListingRow(ctx, listing_id);
   if (!l) return c.json({ error: 'not found' }, 404);
+  const seller = `https://t.me/${ctx.store.config.seller}`;
+  // «Спросить» — без заявки: продавцу приходит, что покупатель пишет про этот товар
+  if (kind === 'ask') {
+    await logEvent(ctx, 'ask_click', user.id, { listing_id: l.id, model_id: l.model_id });
+    c.executionCtx.waitUntil(sendQuestion(ctx, l, user));
+    const text = `Здравствуйте! Вопрос по ${listingTitle(l)} (пост ${l.msg_id}): `;
+    return c.json({ ok: true, text, url: `${seller}?text=${encodeURIComponent(text)}` });
+  }
   await logEvent(ctx, 'buy_click', user.id, { listing_id: l.id, model_id: l.model_id });
   await c.env.DB.prepare('INSERT INTO leads (store_id, listing_id, tg_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
     .bind(ctx.store.id, l.id, user.id, now(), now())
     .run();
   c.executionCtx.waitUntil(sendBuyRequest(ctx, l, user));
   const text = `Здравствуйте! Хочу ${listingTitle(l)}${l.price ? ` за ${formatPrice(l.price)}` : ''} (пост ${l.msg_id})`;
-  return c.json({ ok: true, text, url: `https://t.me/${ctx.store.config.seller}?text=${encodeURIComponent(text)}` });
+  return c.json({ ok: true, text, url: `${seller}?text=${encodeURIComponent(text)}` });
 });
 
 app.get('/api/subscriptions', async (c) => c.json({ items: await listSubscriptions(ctxOf(c), c.get('user')!.id) }));
@@ -124,13 +143,10 @@ app.get('/api/subscriptions', async (c) => c.json({ items: await listSubscriptio
 app.post('/api/subscriptions', async (c) => {
   const user = c.get('user')!;
   const ctx = ctxOf(c);
-  const b = await c.req.json<{ model_id?: string; family?: string; storage_gb?: number | null; max_price?: number | null }>();
-  // мини-апп прототипа присылает короткое имя модели — находим её id по карточкам магазина
-  const model = await c.env.DB.prepare(
-    `SELECT model_id, title FROM listings WHERE store_id = ? AND model_id IS NOT NULL AND (model_id = ? OR short = ?) LIMIT 1`,
-  )
-    .bind(ctx.store.id, b.model_id ?? '', b.family ?? '')
-    .first<{ model_id: string; title: string }>();
+  const b = await c.req.json<{ model_id?: string; title?: string; storage_gb?: number | null; max_price?: number | null }>();
+  // модель приходит из умного поиска мини-аппа: сверяем id со словарём, чтобы в базу не попал мусор
+  const matched = b.title ? matchModel(b.title) : null;
+  const model = matched && matched.id === b.model_id ? { model_id: matched.id, title: matched.title } : null;
   if (!model) return c.json({ error: 'model required' }, 400);
   await c.env.DB.prepare(
     'INSERT INTO subscriptions (store_id, tg_user_id, model_id, title, storage_gb, max_price, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -149,6 +165,68 @@ app.delete('/api/subscriptions/:id', async (c) => {
     .bind(+c.req.param('id'), user.id, ctx.store.id)
     .run();
   return c.json({ items: await listSubscriptions(ctx, user.id) });
+});
+
+// ——— Избранное ———
+app.get('/api/favorites', async (c) => c.json({ items: await listFavorites(ctxOf(c), c.get('user')!.id) }));
+
+app.put('/api/favorites/:id', async (c) => {
+  const ctx = ctxOf(c);
+  const l = await getListingRow(ctx, +c.req.param('id'));
+  if (!l) return c.json({ error: 'not found' }, 404);
+  await c.env.DB.prepare('INSERT OR IGNORE INTO favorites (store_id, tg_user_id, listing_id, price, created_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(ctx.store.id, c.get('user')!.id, l.id, l.price, now())
+    .run();
+  return c.json({ ok: true });
+});
+
+app.delete('/api/favorites/:id', async (c) => {
+  await c.env.DB.prepare('DELETE FROM favorites WHERE store_id = ? AND tg_user_id = ? AND listing_id = ?')
+    .bind(ctxOf(c).store.id, c.get('user')!.id, +c.req.param('id'))
+    .run();
+  return c.json({ ok: true });
+});
+
+// ——— Кабинет продавца: только для ADMIN_IDS ———
+app.use('/api/cabinet/*', async (c, next) => {
+  if (!adminIds(c.env).includes(c.get('user')?.id ?? 0)) return c.json({ error: 'forbidden' }, 403);
+  await next();
+});
+app.use('/api/cabinet', async (c, next) => {
+  if (!adminIds(c.env).includes(c.get('user')?.id ?? 0)) return c.json({ error: 'forbidden' }, 403);
+  await next();
+});
+
+app.get('/api/cabinet', async (c) => c.json(await cabinetData(ctxOf(c), Math.min(90, num(c.req.query('days')) ?? 7))));
+
+const LISTING_ACTIONS = { hide: 'hidden', sold: 'sold', reserve: 'reserved', active: 'active' } as const;
+
+app.post('/api/cabinet/listings/:id', async (c) => {
+  const ctx = ctxOf(c);
+  const id = +c.req.param('id');
+  const { action } = await c.req.json<{ action: 'confirm' | keyof typeof LISTING_ACTIONS }>();
+  if (action === 'confirm') {
+    const l = await c.env.DB.prepare('UPDATE listings SET confirmed = 1 WHERE id = ? AND store_id = ? RETURNING *').bind(id, ctx.store.id).first<ListingRow>();
+    if (!l) return c.json({ error: 'not found' }, 404);
+    c.executionCtx.waitUntil(notifySubscribers(ctx, new URL(c.req.url).origin, l));
+    return c.json({ ok: true });
+  }
+  if (!(action in LISTING_ACTIONS)) return c.json({ error: 'bad action' }, 400);
+  const l = await setStatus(ctx, id, LISTING_ACTIONS[action]);
+  return l ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404);
+});
+
+app.post('/api/cabinet/leads/:id', async (c) => {
+  const ctx = ctxOf(c);
+  const { status } = await c.req.json<{ status: 'new' | 'work' | 'sold' }>();
+  if (!['new', 'work', 'sold'].includes(status)) return c.json({ error: 'bad status' }, 400);
+  const lead = await c.env.DB.prepare('UPDATE leads SET status = ?, updated_at = ? WHERE id = ? AND store_id = ? RETURNING listing_id')
+    .bind(status, now(), +c.req.param('id'), ctx.store.id)
+    .first<{ listing_id: number }>();
+  if (!lead) return c.json({ error: 'not found' }, 404);
+  // «Продал» снимает карточку; правка поста в канале — на этапе 5
+  if (status === 'sold') await setStatus(ctx, lead.listing_id, 'sold');
+  return c.json({ ok: true });
 });
 
 // ——— Админка для CLI (ключ в секрете ADMIN_API_KEY) ———

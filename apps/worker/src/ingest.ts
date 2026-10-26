@@ -20,6 +20,8 @@ export interface UpsertResult {
   created: boolean;
   becameSold: boolean;
   priceChanged: boolean;
+  /** Цена до правки поста — для уведомления о снижении */
+  oldPrice: number | null;
 }
 
 export interface UpsertOptions {
@@ -68,7 +70,7 @@ export async function upsertPost(ctx: Ctx, post: IncomingPost, opts: UpsertOptio
       .first<ListingRow>();
     if (!row) return null;
     await attachGroupMedia(ctx, row);
-    return { listing: row, parsed: p, created: true, becameSold: false, priceChanged: false };
+    return { listing: row, parsed: p, created: true, becameSold: false, priceChanged: false, oldPrice: null };
   }
 
   // Правка поста: «Продано» → sold, снова в наличии → active. Скрытые вручную остаются скрытыми.
@@ -91,7 +93,7 @@ export async function upsertPost(ctx: Ctx, post: IncomingPost, opts: UpsertOptio
   )
     .bind(...(keep ? [] : listingValues(p)), status, ts, status, ts, status, existing.id)
     .first<ListingRow>();
-  return row ? { listing: row, parsed: p, created: false, becameSold, priceChanged } : null;
+  return row ? { listing: row, parsed: p, created: false, becameSold, priceChanged, oldPrice: existing.price } : null;
 }
 
 const LISTING_COLS = [

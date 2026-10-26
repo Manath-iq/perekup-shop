@@ -65,6 +65,29 @@ export async function sendBuyRequest(ctx: Ctx, l: ListingRow, user: { id: number
   await toAdmins(ctx.env, `🛒 ${who} нажал «Купить»: <b>${esc(listingTitle(l))}</b>${l.price ? ', ' + formatPrice(l.price) : ''}\n<a href="${l.post_url}">Пост в канале</a>`);
 }
 
+export async function sendQuestion(ctx: Ctx, l: ListingRow, user: { id: number; username?: string; first_name?: string }) {
+  const who = user.username ? `@${esc(user.username)}` : `<a href="tg://user?id=${user.id}">${esc(user.first_name ?? 'Покупатель')}</a>`;
+  await toAdmins(ctx.env, `💬 ${who} хочет спросить про <b>${esc(listingTitle(l))}</b>${l.price ? ', ' + formatPrice(l.price) : ''}\n<a href="${l.post_url}">Пост в канале</a>`);
+}
+
+/** Цена снизилась — написать тем, у кого карточка в избранном */
+export async function notifyPriceDrop(ctx: Ctx, origin: string, l: ListingRow, oldPrice: number) {
+  const { env } = ctx;
+  if (!l.price || l.price >= oldPrice || l.status === 'sold' || l.status === 'hidden') return;
+  const { results } = await env.DB.prepare('SELECT tg_user_id FROM favorites WHERE store_id = ? AND listing_id = ?')
+    .bind(l.store_id, l.id)
+    .all<{ tg_user_id: number }>();
+  const kb = new InlineKeyboard().webApp('Открыть карточку', cardUrl(ctx, origin, l.id));
+  for (const { tg_user_id } of results) {
+    await api(env)
+      .sendMessage(tg_user_id, `📉 Цена снизилась: <b>${esc(listingTitle(l))}</b> — ${formatPrice(l.price)} вместо ${formatPrice(oldPrice)}`, {
+        parse_mode: 'HTML',
+        reply_markup: kb,
+      })
+      .catch((e) => console.warn('price drop notify failed', tg_user_id, String(e)));
+  }
+}
+
 /** Разослать новую карточку подписчикам, у которых совпали модель, память и потолок цены */
 export async function notifySubscribers(ctx: Ctx, origin: string, l: ListingRow) {
   const { env } = ctx;
