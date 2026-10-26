@@ -38,7 +38,6 @@ export const mediaUrl = (key: string) => `/media/${key}`;
 
 export function toListing(r: ListingRow & { cover_key?: string | null; cover_blur?: string | null; old_price?: number | null }): Listing {
   const attrs: Attrs = JSON.parse(r.attrs);
-  const old = r.old_price && r.price && r.old_price > r.price ? r.old_price : null;
   return {
     id: r.id,
     msg_id: r.msg_id,
@@ -49,7 +48,7 @@ export function toListing(r: ListingRow & { cover_key?: string | null; cover_blu
     short: r.short,
     title: r.title,
     price: r.price,
-    old_price: old,
+    old_price: r.old_price && r.price && r.old_price > r.price ? r.old_price : null,
     attrs,
     pluses: JSON.parse(r.pluses),
     nuances: JSON.parse(r.nuances),
@@ -58,21 +57,6 @@ export function toListing(r: ListingRow & { cover_key?: string | null; cover_blu
     created_at: r.created_at,
     cover: r.cover_key ? mediaUrl(r.cover_key) : null,
     cover_blur: r.cover_blur ?? null,
-    // поля прототипа для текущего мини-аппа
-    channel_msg_id: r.msg_id,
-    family: r.short,
-    model_raw: r.title,
-    storage_gb: attrs.storage_gb ?? null,
-    condition: attrs.condition ?? null,
-    sim: attrs.sim ?? null,
-    has_physical_sim: attrs.physical_sim ?? null,
-    battery_pct: attrs.battery_pct ?? null,
-    battery_cycles: attrs.battery_cycles ?? null,
-    ios: attrs.os_version ?? null,
-    kit: attrs.kit ?? null,
-    full_kit: !!attrs.full_kit,
-    price_rub: r.price,
-    old_price_rub: old,
   };
 }
 
@@ -96,8 +80,6 @@ const LISTING_SELECT = `
 export interface ListingQuery {
   category?: string;
   model_id?: string;
-  /** Короткое имя модели — так фильтрует мини-апп прототипа */
-  family?: string;
   storage?: number;
   price_min?: number;
   price_max?: number;
@@ -113,7 +95,6 @@ export async function queryListings({ env, store }: Ctx, q: ListingQuery): Promi
   const add = (sql: string, v: unknown) => (where.push(sql), args.push(v));
   if (q.category) add('l.category = ?', q.category);
   if (q.model_id) add('l.model_id = ?', q.model_id);
-  if (q.family) add('l.short = ?', q.family);
   if (q.storage) add('l.storage_gb = ?', q.storage);
   if (q.price_min) add('l.price >= ?', q.price_min);
   if (q.price_max) add('l.price <= ?', q.price_max);
@@ -193,7 +174,6 @@ export async function getFacets(ctx: Ctx): Promise<Facets> {
     total: agg?.total ?? 0,
     categories: cats.results.map((c) => ({ ...c, title: CATEGORIES[c.category]?.title ?? c.category })),
     models: sorted,
-    families: sorted.map((m) => ({ family: m.short, count: m.count })),
     storages: st.results.map((r) => r.storage_gb),
     conditions: cond.results.map((r) => r.condition),
     price_min: agg?.pmin ?? 0,
@@ -236,8 +216,7 @@ export async function upsertUser({ env }: Ctx, u: { id: number; username?: strin
 
 export async function listSubscriptions({ env, store }: Ctx, userId: number): Promise<Subscription[]> {
   const { results } = await env.DB.prepare(
-    `SELECT s.id, s.model_id, s.title, s.storage_gb, s.max_price, s.created_at,
-       COALESCE((SELECT short FROM listings l WHERE l.store_id = s.store_id AND l.model_id = s.model_id LIMIT 1), s.title) AS family
+    `SELECT s.id, s.model_id, s.title, s.storage_gb, s.max_price, s.created_at
      FROM subscriptions s WHERE s.store_id = ? AND s.tg_user_id = ? AND s.active = 1 ORDER BY s.created_at DESC`,
   )
     .bind(store.id, userId)

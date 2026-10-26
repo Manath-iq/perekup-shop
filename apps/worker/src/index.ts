@@ -61,7 +61,6 @@ app.get('/api/listings', async (c) => {
   const items = await queryListings(ctxOf(c), {
     category: q.category || undefined,
     model_id: q.model || undefined,
-    family: q.family || undefined,
     storage: num(q.storage),
     price_min: num(q.price_min),
     price_max: num(q.price_max),
