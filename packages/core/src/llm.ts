@@ -3,8 +3,11 @@ import type { ParseResult, PostStatus } from './parse';
 
 /** Модель для разбора постов: дешёвая и быстрая. Алиас Google указывает на актуальную flash-lite. */
 export const GEMINI_PARSE_MODEL = 'gemini-flash-lite-latest';
-/** Модель для генерации профилей разбора: один раз на клиента */
-export const GEMINI_PROFILE_MODEL = 'gemini-flash-latest';
+/**
+ * Модели для генерации профилей разбора, по очереди: один раз на клиента.
+ * Алиас gemini-flash-latest в октябре 2026 подвисал, поэтому версии закреплены явно.
+ */
+export const GEMINI_PROFILE_MODELS = ['gemini-3.5-flash', 'gemini-2.5-flash'];
 
 const nullable = (type: string, extra: Record<string, unknown> = {}) => ({ type: [type, 'null'], ...extra });
 

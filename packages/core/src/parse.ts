@@ -1,5 +1,5 @@
 import { CATEGORIES, matchModel, type Attrs, type AttrKey, type Category, type ModelMatch } from './catalog';
-import { leadingMarker, markerTest, resolveProfile, stripVS, type ParseProfile } from './profile';
+import { leadingMarker, markerEnd, markerTest, resolveProfile, stripVS, type ParseProfile } from './profile';
 
 export type PostStatus = 'active' | 'reserved' | 'sold' | 'not_listing';
 
@@ -182,22 +182,31 @@ function toPrice(digits: string, suffix?: string): number | null {
   return n >= 500 && n <= 5_000_000 ? n : null;
 }
 
-const NUM = '(\\d{1,3}(?:[ .,]\\d{3})+|\\d{3,7}|\\d{2,3}(?:[.,]\\d)?(?=\\s*(?:к|k|тыс)))';
+// (?!\d) — чтобы «MacBook Air 13 2019» не склеилось в цену «13 201»
+const NUM = '(\\d{1,3}(?:[ .,]\\d{3})+(?!\\d)|\\d{3,7}(?!\\d)|\\d{2,3}(?:[.,]\\d)?(?=\\s*(?:к|k|тыс)))';
 const K_SUFFIX = '\\s*(к|k|тыс\\.?)?(?![\\p{L}])';
 const CURRENCY_RE = new RegExp(`${NUM}\\s*(?:₽|руб\\p{L}*\\.?|р\\.?(?![\\p{L}])|rub)`, 'iu');
 const K_RE = new RegExp(`(?<![\\d.,])(\\d{2,3}(?:[.,]\\d)?)\\s*(к|k|тыс\\.?)(?![\\p{L}])`, 'iu');
+const TAIL_PRICE_RE = /[-–—:]\s*(\d{1,3}(?:[ .,]\d{3})+)\s*(?:\.|₽|р\.?)?\s*$/u;
 const OLD_PRICE_LINE = /был[оа]?|старая\s*цена|вместо|без\s*скидки/iu;
 
-function extractPrice(lines: string[], profile: ParseProfile): { price: number | null; old: number | null } {
-  const isPriceMarker = markerTest(profile.priceMarkers);
+const DATE_RE = /(?<!\d)\d{1,2}[./]\d{1,2}[./]\d{2,4}(?!\d)/g;
+
+function extractPrice(rawLines: string[], profile: ParseProfile): { price: number | null; old: number | null } {
+  // «В наличии на 27.02.2026» — дата, а не цена
+  const lines = rawLines.map((l) => l.replace(DATE_RE, ' '));
   let old: number | null = null;
-  const pick = (re: RegExp, filter: (l: string) => boolean) => {
+  const afterMarker = new RegExp(`${NUM}${K_SUFFIX}`, 'u');
+  // from — с какого места строки искать: для строки с меткой цены — сразу после метки
+  const pick = (re: RegExp, filter: (l: string) => boolean, from: (l: string) => number = () => 0) => {
     for (const l of lines) {
       if (!filter(l)) continue;
-      const m = l.match(re);
+      const m = l.slice(Math.max(0, from(l))).match(re);
       if (!m) continue;
       const p = toPrice(m[1], m[2]);
       if (!p) continue;
+      // «2020» после «стоимость» без ₽ — скорее год модели; цену с валютой найдёт следующий шаг
+      if (re === afterMarker && !m[2] && p >= 1990 && p <= 2035 && !/^\s*(₽|руб|р\b)/u.test(l.slice(l.indexOf(m[1]) + m[1].length))) continue;
       if (OLD_PRICE_LINE.test(l)) {
         old ??= p;
         continue;
@@ -206,12 +215,13 @@ function extractPrice(lines: string[], profile: ParseProfile): { price: number |
     }
     return null;
   };
-  const afterMarker = new RegExp(`${NUM}${K_SUFFIX}`, 'u');
   const price =
     // 1. строка с меткой цены: число после метки
-    pick(afterMarker, (l) => isPriceMarker(l) && !/акб|%/iu.test(l)) ??
+    pick(afterMarker, (l) => markerEnd(l, profile.priceMarkers) >= 0 && !/акб|%/iu.test(l), (l) => markerEnd(l, profile.priceMarkers)) ??
     // 2. число с валютой
     pick(CURRENCY_RE, () => true) ??
+    // 2½. «… - 61.990» в конце строки: число с разделителем тысяч после тире
+    pick(TAIL_PRICE_RE, () => true) ??
     // 3. «60к» в любой строке: у суффикса «к/тыс» не бывает процентов, поэтому АКБ в той же строке не мешает
     pick(K_RE, (l) => !/\d\s*(мм|mm)/iu.test(l));
   if (old === null) {
@@ -368,4 +378,43 @@ export function parsePost(rawText: string, profileInput?: Partial<ParseProfile> 
     parse_ok: missing.length === 0 && confidence >= profile.threshold,
     source: 'rules',
   };
+}
+
+/**
+ * Пост-прайс: «В наличии на 27.02» и дальше по строке на товар с ценой.
+ * Если в посте две и больше строк, где есть и модель, и цена, — каждая строка становится своей карточкой.
+ * Статус по меткам поста общий, «продано» в самой строке снимает только её.
+ */
+export interface ParsedItem extends ParseResult {
+  /** 0 — обычный пост, 1…n — строка прайса */
+  item: number;
+  /** Строка прайса, из которой разобрана карточка */
+  line?: string;
+}
+
+export function parseItems(rawText: string, profileInput?: Partial<ParseProfile> | null): ParsedItem[] {
+  const profile = resolveProfile(profileInput);
+  const lines = normalizeText(rawText).split('\n');
+  const priced = (l: string) => extractPrice([l], profile).price !== null;
+  const withModel = lines.filter((l) => matchModel(l, { defaultBrand: profile.defaultBrand }) && priced(l));
+  if (withModel.length < 2 || markerTest(profile.ignoreMarkers)(rawText)) return [{ ...parsePost(rawText, profile), item: 0 }];
+  // раз это прайс, товаром считается и строка с ценой без модели из словаря: «Dyson Airwrap …, цена 21 990 ₽»
+  // услуги в прайсе — не товар: «Быстрая доставка по Москве - 1000р.»
+  const SERVICE = /доставк|гаранти|обмен|trade[-\s]?in|трейд|рассрочк|скидк|выкуп|ремонт|замена/iu;
+  const items = lines.filter(
+    (l) => priced(l) && (matchModel(l, { defaultBrand: profile.defaultBrand }) || (!SERVICE.test(l) && /\p{L}{3,}/u.test(l.replace(/цена|стоимость|руб\p{L}*/giu, '')))),
+  );
+  const isSold = markerTest(profile.soldMarkers);
+  const isReserved = markerTest(profile.reservedMarkers);
+  // статус прайса — по шапке, без строк товаров: «продано» в строке снимает только эту строку,
+  // а отсутствие метки «в наличии» прайс не продаёт — сам пост и есть список того, что есть
+  const header = lines.filter((l) => !items.includes(l)).join('\n');
+  const postStatus: PostStatus = isSold(header) ? 'sold' : isReserved(header) ? 'reserved' : 'active';
+  return items.map((line, i) => {
+    const p = parsePost(line, { ...profile, mode: 'unless_sold', activeMarkers: [] });
+    // без модели заголовок — начало строки до цены: «Dyson Airwrap Long HS05 сине-розовый»
+    if (!p.model && p.title) p.title = p.title.split(/,|\s[-–—]\s|\s(?:цена|стоимость)\b/iu)[0].trim() || p.title;
+    const status: PostStatus = isSold(line) ? 'sold' : isReserved(line) ? 'reserved' : postStatus;
+    return { ...p, status, status_source: 'marker', item: i + 1, line: line.trim() };
+  });
 }

@@ -206,6 +206,6 @@ export async function handleMedia(env: Env, req: Request): Promise<Response> {
   const path = decodeURIComponent(url.pathname.slice('/media/'.length));
   const proxied = path.match(/^i\/(\d+)$/);
   if (proxied) return serveProxied(env, +proxied[1], url.searchParams.get('v') === 'poster', req);
-  if (!/^(c|rev|m)\/[\w./-]+$/.test(path)) return notFound();
+  if (!/^(a|c|rev|m)\/[\w./-]+$/.test(path)) return notFound();
   return serveKv(env, path, req);
 }

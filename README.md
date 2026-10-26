@@ -36,6 +36,20 @@ npm run cli -- import raxi 3            # импорт трёх страниц �
 npm run cli -- reparse raxi             # перепарсить всё после правки profile.json
 ```
 
+## Демо для перекупа
+
+Демо-деплой — `vitrina-demo` на `@perekup_shop_bot`, конфиг в `clients/_demo/wrangler.jsonc`, ключи — `DEMO_URL` и `DEMO_ADMIN_KEY` в `.env`.
+
+```bash
+npm run cli -- demo apple_raxi            # магазин на ленте канала: ссылка t.me/perekup_shop_bot?start=apple_raxi и QR
+npm run cli -- demo some_channel --fresh  # пересоздать с нуля
+npm run cli -- demo old_channel --stale 0 # канал давно не постит — не считать старые объявления устаревшими
+npm run cli -- demos                      # список демо
+npm run demo:deploy                       # сборка, миграции, деплой демо-воркера
+```
+
+Профиль, отчёт и QR сохраняются в `demos/<канал>/` (не коммитится). В боте админу доступна команда `/demos` со ссылками.
+
 ## Как устроен разбор
 
 Медиа: в KV только обложки (одна запись на карточку), галерея и видео идут через `/media/i/<id>` прямо из Telegram, кэширует их Workers Caching перед точкой входа `CachedMedia`.

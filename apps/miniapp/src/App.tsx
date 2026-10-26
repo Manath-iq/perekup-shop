@@ -12,6 +12,7 @@ import { Subscriptions } from './components/Subscriptions';
 import { About } from './components/About';
 import { Cabinet } from './components/Cabinet';
 import { IconBell, IconChart, IconGrid, IconStore } from './icons';
+import { Emoji } from './components/Emoji';
 
 type Tab = 'catalog' | 'subs' | 'about' | 'cabinet';
 const FILTERS_KEY = 'vitrina:filters';
@@ -30,6 +31,8 @@ export function App() {
   const [store, setStore] = useState<StoreInfo | null>(null);
   const [admin, setAdmin] = useState(false);
   const [error, setError] = useState(false);
+  // демо-деплой открыли без ссылки на магазин
+  const [noStore, setNoStore] = useState(false);
   const [filters, setFiltersRaw] = useState<Filters>(loadFilters);
   const [sheet, setSheet] = useState(false);
   const [tab, setTab] = useState<Tab>('catalog');
@@ -57,7 +60,7 @@ export function App() {
     setError(false);
     Promise.all([api.listings(), api.facets()])
       .then(([l, f]) => (setItems(l), setFacets(f)))
-      .catch(() => setError(true));
+      .catch((e: { status?: number }) => (e.status === 404 ? setNoStore(true) : setError(true)));
   };
 
   useEffect(() => {
@@ -168,6 +171,20 @@ export function App() {
     ['about', 'О магазине', IconStore],
     ...(admin ? ([['cabinet', 'Кабинет', IconChart]] as [Tab, string, typeof IconGrid][]) : []),
   ];
+
+  if (noStore)
+    return (
+      <div class="app">
+        <div class="page">
+          <div class="glow" aria-hidden="true" />
+          <div class="panel empty" style={{ marginTop: '40px' }}>
+            <Emoji name="sparkles" size={56} />
+            <h3>Витрина</h3>
+            <p>Магазин внутри Telegram для каналов с техникой. Откройте ссылку на магазин, которую вам прислали.</p>
+          </div>
+        </div>
+      </div>
+    );
 
   return (
     <div class="app">

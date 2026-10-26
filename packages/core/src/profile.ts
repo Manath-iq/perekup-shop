@@ -24,6 +24,11 @@ export interface ParseProfile {
   defaultBrand?: string;
   /** Ниже этой уверенности карточка ждёт подтверждения продавца */
   threshold: number;
+  /**
+   * Только для unless_sold: объявление старше стольких дней считается неактуальным.
+   * Продавцы без отметок «продано» просто перестают упоминать товар; 0 — не устаревает.
+   */
+  staleDays: number;
 }
 
 export const DEFAULT_PROFILE: ParseProfile = {
@@ -38,6 +43,7 @@ export const DEFAULT_PROFILE: ParseProfile = {
   nuanceMarkers: ['✖', '❌', '⚠', '❗', '➖', '🔴'],
   conditionLabels: ['состояние', 'condition'],
   threshold: 0.75,
+  staleDays: 60,
 };
 
 export function resolveProfile(p: Partial<ParseProfile> | null | undefined): ParseProfile {
@@ -62,6 +68,26 @@ export function markerTest(markers: string[]): (s: string) => boolean {
     return (s: string) => s.toLowerCase().includes(needle);
   });
   return (s) => tests.some((t) => t(s));
+}
+
+/** Где кончается первая найденная метка в строке; -1 — метки нет */
+export function markerEnd(line: string, markers: string[]): number {
+  const low = line.toLowerCase();
+  let best = -1;
+  for (const m of markers) {
+    const re = m.match(/^\/(.+)\/([a-z]*)$/);
+    let end = -1;
+    if (re) {
+      const r = new RegExp(re[1], re[2].replace('g', '') + (re[2].includes('u') ? '' : 'u')).exec(line);
+      if (r) end = r.index + r[0].length;
+    } else {
+      const needle = stripVS(m).toLowerCase();
+      const i = low.indexOf(needle);
+      if (i >= 0) end = i + needle.length;
+    }
+    if (end >= 0 && (best < 0 || end < best)) best = end;
+  }
+  return best;
 }
 
 /** Метка в начале строки (плюсы и нюансы). Возвращает строку без метки или null */

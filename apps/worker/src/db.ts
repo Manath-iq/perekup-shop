@@ -8,6 +8,8 @@ export interface ListingRow {
   id: number;
   store_id: string;
   msg_id: number;
+  /** 0 — обычный пост, 1…n — строка поста-прайса */
+  item: number;
   media_group_id: string | null;
   category: Category;
   brand: string | null;

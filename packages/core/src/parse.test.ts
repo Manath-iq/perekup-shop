@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { matchModel } from './catalog';
-import { parsePost } from './parse';
+import { parseItems, parsePost } from './parse';
 import { mergeLlm } from './llm';
 
 describe('словарь моделей', () => {
@@ -46,6 +46,11 @@ describe('словарь моделей', () => {
     ['Xbox Series X', 'xbox-series-x', 'Series X'],
     ['Nintendo Switch OLED', 'nintendo-switch-oled', 'OLED'],
     ['Steam Deck OLED 512', 'steam-deck-oled', 'OLED'],
+    ['Samsung Galaxy Z Flip НОВЫЙ', 'galaxy-z-flip', 'Z Flip'],
+    ['HUAWEI MatePad 11 Wi-Fi', 'huawei-matepad-11', '11'],
+    ['Huawei P60 Pro', 'huawei-p-60-pro', '60 Pro'],
+    ['Apple TV 4K 64GB', 'apple-tv-4k', '4K'],
+    ['Honor Magic 6 Pro', 'honor-magic-6-pro', 'Magic 6 Pro'],
   ])('%s', (text, id, short) => {
     const m = matchModel(text);
     expect(m?.id ?? null).toBe(id);
@@ -152,5 +157,45 @@ describe('слияние с ответом LLM', () => {
     expect(merged.attrs.storage_gb).toBe(256);
     expect(merged.missing).toEqual([]);
     expect(merged.parse_ok).toBe(false);
+  });
+});
+
+describe('пост-прайс', () => {
+  const LIST = `⁉️В наличии  на 27.02.2026  🎎
+
+💻Apple MacBook Air 13 2019 8/128 silver, цена 26.990₽  (Отличное состояние, полный комплект)
+
+⌚️Apple Watch Series 10 46mm, jet black, цена 22.990₽  (Отличное состояние, полный комплек)
+
+👩‍🦰Dyson Airwrap Long HS05 сине-розовый, цена 21.990 ₽  (Отличное состояние, полный комплект)
+
+📱iPhone 16 Pro Max 256 desert titanium, цена 74.990 ₽  (Отличное состояние) — продано
+
+🏎 Быстрая доставка по г. Москва - 1000р.`;
+
+  it('делит прайс на карточки по строкам с моделью и ценой', () => {
+    const items = parseItems(LIST);
+    expect(items.map((i) => [i.item, i.model?.id, i.price, i.status])).toEqual([
+      [1, 'macbook-air', 26990, 'active'],
+      [2, 'apple-watch-series-10', 22990, 'active'],
+      [3, undefined, 21990, 'active'],
+      [4, 'iphone-16-pro-max', 74990, 'sold'],
+    ]);
+    expect(items[2].title).toBe('Dyson Airwrap Long HS05 сине-розовый');
+    expect(items[0].attrs).toMatchObject({ ram_gb: 8, storage_gb: 128, screen_in: 13, condition: 'Отличное', full_kit: true });
+    expect(items[1].attrs.case_mm).toBe(46);
+  });
+
+  it('обычный пост остаётся одной карточкой', () => {
+    expect(parseItems('📱 iPhone 16 128GB\n💰 43 990 ₽\nИли обмен на iPhone 15 с доплатой 10 000 ₽').map((i) => i.item)).toEqual([0]);
+  });
+
+  it('цена после тире в конце строки', () => {
+    expect(parsePost('🇷🇺 MacBook Air 13 2018 Silver (1.6/8/256) - 61.990').price).toBe(61990);
+  });
+
+  it('год модели не склеивается с ценой', () => {
+    expect(parsePost('MacBook Air 13 2019 8/128, цена 26.990₽').price).toBe(26990);
+    expect(parsePost('MacBook Pro 13 2020 M1, стоимость 2020 год — 95 990 ₽').price).toBe(95990);
   });
 });

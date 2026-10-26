@@ -1,0 +1,36 @@
+// Демо-деплой на @perekup_shop_bot: много магазинов в одном воркере, по одному на импортированный канал.
+// Демо создаёт `npm run cli -- demo <канал>`, через 7 дней магазин удаляется сам.
+{
+  "name": "vitrina-demo",
+  "main": "../../apps/worker/src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // Workers Caching только перед медиа: API и бот динамические
+  "cache": { "enabled": false },
+  "exports": {
+    "default": { "type": "worker", "cache": { "enabled": false } },
+    "CachedMedia": { "type": "worker", "cache": { "enabled": true } }
+  },
+  "assets": {
+    "directory": "../../apps/miniapp/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/media/*", "/bot", "/admin/*", "/cron"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vitrina-demo-db",
+      "database_id": "f25d52cd-7fe9-46ad-8ac7-d645ad381256",
+      "migrations_dir": "../../apps/worker/migrations"
+    }
+  ],
+  "kv_namespaces": [{ "binding": "MEDIA", "id": "b76aa17960ed48108d5235834a7ca2c7" }],
+  // раз в час: свежая страница ленты каждого демо, удалённые посты, обложки, удаление истёкших демо
+  "triggers": { "crons": ["17 * * * *"] },
+  "vars": {
+    "BOT_USERNAME": "perekup_shop_bot",
+    "PUBLIC_READ": "1"
+  }
+  // Секреты: BOT_TOKEN, ADMIN_IDS, WEBHOOK_SECRET, ADMIN_API_KEY, GEMINI_API_KEY
+}

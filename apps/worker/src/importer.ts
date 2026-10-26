@@ -2,7 +2,7 @@ import { parsePost } from '@vitrina/core/parse';
 import { embedHasPost, htmlToText, parseFeed } from '@vitrina/core/scrape';
 import { now } from './env';
 import type { Ctx } from './store';
-import { addMedia, downloadCovers, setStatus, upsertPost } from './ingest';
+import { addMedia, downloadCovers, upsertPost } from './ingest';
 import type { ListingRow } from './db';
 import { kvMediaStore } from './media';
 
@@ -12,7 +12,7 @@ const UA = { 'user-agent': 'Mozilla/5.0 (compatible; VitrinaCatalog/1.0)', 'acce
  * Импорт с публичной ленты t.me/s/<channel>: листаем назад через ?before=, сохраняем все посты.
  * Посты, которые уже есть в базе, перепарсиваются — так ловим «❌ Продано ❌» на старых карточках.
  */
-export async function importChannel(ctx: Ctx, pages = 3) {
+export async function importChannel(ctx: Ctx, pages = 3, covers = 10) {
   const channel = ctx.store.channel;
   let before: number | null = null;
   let seen = 0;
@@ -27,13 +27,13 @@ export async function importChannel(ctx: Ctx, pages = 3) {
     for (const p of posts) {
       seen++;
       if (!p.text) continue;
-      const r = await upsertPost(ctx, {
+      const results = await upsertPost(ctx, {
         msg_id: p.msg_id, text: p.text, media_group_id: `feed:${p.msg_id}`,
         date: p.date, post_url: `https://t.me/${channel}/${p.msg_id}`,
       });
-      if (!r) continue;
-      if (r.created) imported++;
-      if (r.becameSold) sold++;
+      if (!results.length) continue;
+      imported += results.filter((r) => r.created).length;
+      sold += results.filter((r) => r.becameSold).length;
       for (const m of p.media) {
         // у импорта альбом — это один пост, группой служит id первого сообщения
         await addMedia(ctx, { msg_id: m.msg_id, media_group_id: `feed:${p.msg_id}`, kind: m.kind, source: m.url, poster_source: m.thumb ?? null });
@@ -41,7 +41,7 @@ export async function importChannel(ctx: Ctx, pages = 3) {
     }
     before = Math.min(...posts.map((p) => p.msg_id));
   }
-  const media = await downloadCovers(ctx, 10);
+  const media = await downloadCovers(ctx, covers);
   return { seen, imported, sold, media };
 }
 
@@ -54,7 +54,8 @@ export async function checkDeleted(ctx: Ctx, limit = 15) {
   // у приватного канала нет публичных страниц
   if (/^-?\d+$/.test(store.channel)) return { checked: 0, removed: 0 };
   const { results } = await env.DB.prepare(
-    `SELECT * FROM listings WHERE store_id = ? AND status IN ('active', 'reserved') ORDER BY updated_at ASC LIMIT ?`,
+    // по посту, а не по карточке: у прайса десяток строк, а страница одна
+    `SELECT * FROM listings WHERE store_id = ? AND status IN ('active', 'reserved') GROUP BY msg_id ORDER BY MIN(updated_at) ASC LIMIT ?`,
   )
     .bind(store.id, limit)
     .all<ListingRow>();
@@ -65,7 +66,9 @@ export async function checkDeleted(ctx: Ctx, limit = 15) {
     const html = await res.text();
     const textHtml = html.match(/<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/)?.[1];
     if (!embedHasPost(html)) {
-      await setStatus(ctx, l.id, 'sold');
+      await env.DB.prepare(`UPDATE listings SET status = 'sold', sold_at = ?, updated_at = ? WHERE store_id = ? AND msg_id = ? AND status IN ('active', 'reserved')`)
+        .bind(now(), now(), store.id, l.msg_id)
+        .run();
       await env.DB.prepare('UPDATE posts SET deleted = 1 WHERE store_id = ? AND msg_id = ?').bind(store.id, l.msg_id).run();
       removed++;
       continue;
@@ -73,10 +76,10 @@ export async function checkDeleted(ctx: Ctx, limit = 15) {
     const text = textHtml ? htmlToText(textHtml).trim() : '';
     const st = text ? parsePost(text, store.profile).status : null;
     if (st === 'sold' || st === 'not_listing') {
-      const r = await upsertPost(ctx, { msg_id: l.msg_id, text, media_group_id: l.media_group_id, date: l.created_at, post_url: l.post_url }, { llm: false });
-      if (r?.becameSold) removed++;
+      const results = await upsertPost(ctx, { msg_id: l.msg_id, text, media_group_id: l.media_group_id, date: l.created_at, post_url: l.post_url }, { llm: false });
+      removed += results.filter((r) => r.becameSold).length;
     } else {
-      await env.DB.prepare('UPDATE listings SET updated_at = ? WHERE id = ?').bind(now(), l.id).run();
+      await env.DB.prepare('UPDATE listings SET updated_at = ? WHERE store_id = ? AND msg_id = ?').bind(now(), store.id, l.msg_id).run();
     }
   }
   return { checked: results.length, removed };

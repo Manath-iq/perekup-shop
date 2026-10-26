@@ -6,13 +6,29 @@
  *   npm run cli -- import <slug> [страниц]               импорт ленты канала в воркер
  *   npm run cli -- reparse <slug>                        перепарсить сохранённые посты после правки профиля
  *
- * Адрес воркера и ключ: VITRINA_URL и ADMIN_API_KEY (по умолчанию — локальный wrangler dev с ключом dev).
+ *   npm run cli -- demo <канал> [--pages 10] [--days 7] [--seller username] [--stale дней] [--fresh]
+ *                                                        демо на любом публичном канале: ссылка и QR за минуту
+ *   npm run cli -- demos                                 список демо-магазинов
+ *   npm run cli -- demo:delete <канал>                   удалить демо
+ *
+ * Адрес воркера и ключ: VITRINA_URL и ADMIN_API_KEY (по умолчанию — локальный wrangler dev с ключом dev),
+ * для демо — DEMO_URL и DEMO_ADMIN_KEY. Всё читается из .env в корне.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { parsePost, type ParseResult } from '../packages/core/src/parse';
 import { parseFeed, type ScrapedPost } from '../packages/core/src/scrape';
 import type { ParseProfile } from '../packages/core/src/profile';
 import type { StoreConfig } from '../packages/core/src/store';
+import { runDemo } from './demo';
+
+// .env в корне: секреты для CLI, в репозиторий не попадает
+const envFile = new URL('../.env', import.meta.url);
+if (existsSync(envFile)) {
+  for (const line of readFileSync(envFile, 'utf8').split('\n')) {
+    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
+  }
+}
 
 const BASE = process.env.VITRINA_URL ?? 'http://localhost:8787';
 const KEY = process.env.ADMIN_API_KEY ?? 'dev';
@@ -81,9 +97,58 @@ async function profileTest(target: string, pages: number) {
   if (models.size) console.log(`\nМодели в наличии: ${[...models].sort((a, b) => b[1] - a[1]).map(([t, n]) => `${t} ×${n}`).join(', ')}`);
 }
 
+function flags(args: string[]) {
+  const out: Record<string, string | true> = {};
+  for (let i = 0; i < args.length; i++) {
+    const m = args[i].match(/^--([\w-]+)$/);
+    if (!m) continue;
+    const next = args[i + 1];
+    if (next && !next.startsWith('--')) (out[m[1]] = next), i++;
+    else out[m[1]] = true;
+  }
+  return out;
+}
+
+const demoTarget = () => {
+  const base = process.env.DEMO_URL;
+  const key = process.env.DEMO_ADMIN_KEY;
+  if (!base || !key) throw new Error('нужны DEMO_URL и DEMO_ADMIN_KEY в .env');
+  return { base: base.replace(/\/$/, ''), key };
+};
+
 async function main() {
   const [cmd, arg, extra] = process.argv.slice(2);
   switch (cmd) {
+    case 'demo': {
+      if (!arg) throw new Error('укажите канал: npm run cli -- demo apple_raxi');
+      const f = flags(process.argv.slice(4));
+      return runDemo({
+        channel: arg,
+        pages: Number(f.pages) || 10,
+        days: Number(f.days) || 7,
+        fresh: !!f.fresh,
+        seller: typeof f.seller === 'string' ? f.seller.replace(/^@/, '') : undefined,
+        staleDays: f.stale !== undefined ? Number(f.stale) || 0 : undefined,
+        ...demoTarget(),
+        bot: process.env.BOT_USERNAME ?? 'perekup_shop_bot',
+        geminiKey: process.env.GEMINI_API_KEY,
+      });
+    }
+    case 'demos': {
+      const { base, key } = demoTarget();
+      const list = (await (await fetch(`${base}/admin/stores`, { headers: { 'x-admin-key': key } })).json()) as { id: string; name: string; expires_at: number | null }[];
+      for (const s of list) {
+        const days = s.expires_at ? Math.ceil((s.expires_at * 1000 - Date.now()) / 86400000) : '∞';
+        console.log(`${s.id.padEnd(24)} ${s.name}  · ещё ${days} дн. · https://t.me/${process.env.BOT_USERNAME ?? 'perekup_shop_bot'}?start=${s.id}`);
+      }
+      return;
+    }
+    case 'demo:delete': {
+      const { base, key } = demoTarget();
+      const res = await fetch(`${base}/admin/store?store=${arg.replace(/^@/, '').toLowerCase()}`, { method: 'DELETE', headers: { 'x-admin-key': key } });
+      console.log(res.status, await res.text());
+      return;
+    }
     case 'profile:test':
       if (!arg) throw new Error('укажите slug клиента или канал');
       return profileTest(arg, Number(extra) || 5);

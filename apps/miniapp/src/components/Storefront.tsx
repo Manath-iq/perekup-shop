@@ -206,7 +206,7 @@ function Catalog({ items, facets, filters, setFilters, error, onRetry, onOpen, o
                   <span class="model-count">{m.count}</span>
                 </span>
                 <span style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 }}>
-                  <span class="model-short">{m.short || m.line}</span>
+                  <span class={`model-short ${(m.short || m.line).length > 7 ? 'long' : ''}`}>{m.short || m.line}</span>
                   {m.min_price && <span class="muted" style={{ fontSize: '13px' }}>от {formatPrice(m.min_price)}</span>}
                 </span>
               </button>

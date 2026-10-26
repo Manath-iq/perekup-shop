@@ -196,6 +196,11 @@ const MATCHERS: Matcher[] = [
     build: (m) => mk('samsung', 'audio', 'Galaxy Buds', [m[1], m[2]].filter(Boolean).map((x) => normalizeVariant(x)).join(' ')),
   },
   {
+    // «Galaxy Z Flip» без номера поколения
+    re: new RegExp(`${B}(?:samsung\\s*|самсунг\\s*)?galaxy\\s*z\\s*(fold|flip)(?!\\s*\\d)${E}`, 'iu'),
+    build: (m) => mk('samsung', 'phone', 'Galaxy', `Z ${m[1][0].toUpperCase()}${m[1].slice(1).toLowerCase()}`),
+  },
+  {
     re: new RegExp(`${B}(?:samsung\\s*|самсунг\\s*)?(?:galaxy\\s*)?z?\\s*(fold|flip)\\s*(\\d)(?:\\s*(fe))?${E}`, 'iu'),
     build: (m) => mk('samsung', 'phone', 'Galaxy', `Z ${m[1][0].toUpperCase()}${m[1].slice(1).toLowerCase()}${m[2]}${m[3] ? ' FE' : ''}`),
   },
@@ -262,6 +267,25 @@ const MATCHERS: Matcher[] = [
       const variant = normalizeVariant(m[2]);
       return mk('apple', 'phone', 'iPhone', [num, variant].filter(Boolean).join(' '));
     },
+  },
+
+  {
+    re: new RegExp(`${B}(?:apple\\s*)?tv\\s*(4k|4\\s*gen|hd)?(?:\\s*(?:\\d)\\s*gen)?${E}`, 'iu'),
+    build: (m) => (/apple/i.test(m.input.slice(Math.max(0, m.index - 6), m.index + 6)) || /apple\s*tv/i.test(m[0]) ? mk('apple', 'other', 'Apple TV', m[1] && /4k/i.test(m[1]) ? '4K' : '') : null),
+  },
+
+  // ——— Huawei и Honor ———
+  {
+    re: new RegExp(`${B}(?:huawei|хуавей)\\s*(matepad|mate|p|nova|watch|freebuds)\\s*(\\d{1,2}(?:\\.\\d)?)?(?:\\s*(pro\\+?|pro|lite|ultra|se))?${E}`, 'iu'),
+    build: (m) => {
+      const line = { matepad: 'MatePad', mate: 'Mate', p: 'P', nova: 'nova', watch: 'Watch', freebuds: 'FreeBuds' }[m[1].toLowerCase()] ?? m[1];
+      const cat: Category = line === 'MatePad' ? 'tablet' : line === 'Watch' ? 'watch' : line === 'FreeBuds' ? 'audio' : 'phone';
+      return { ...mk('huawei', cat, `Huawei ${line}`, [m[2], m[3] && normalizeVariant(m[3])].filter(Boolean).join(' ')), id: slug(`huawei ${line} ${m[2] ?? ''} ${m[3] ?? ''}`) };
+    },
+  },
+  {
+    re: new RegExp(`${B}(?:honor|хонор)\\s*(magic\\s*\\d{1,2}|x\\d{1,2}[a-z]?|\\d{2,3})(?:\\s*(pro|lite|ultra))?${E}`, 'iu'),
+    build: (m) => mk('honor', 'phone', 'Honor', [ws(m[1]).replace(/^magic/i, 'Magic').toUpperCase().replace('MAGIC', 'Magic'), m[2] && normalizeVariant(m[2])].filter(Boolean).join(' ')),
   },
 
   // ——— Google, Xiaomi ———

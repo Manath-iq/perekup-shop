@@ -511,6 +511,10 @@ h3 {
   display: grid;
   place-items: center;
 }
+.model-short.long {
+  font-size: 17px;
+  letter-spacing: -0.02em;
+}
 .model-short {
   font-size: 21px;
   font-weight: 700;

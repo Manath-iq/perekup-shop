@@ -1,4 +1,4 @@
-import { parsePost, type ParseResult } from '@vitrina/core/parse';
+import { parseItems, type ParsedItem, type ParseResult } from '@vitrina/core/parse';
 import type { ListingStatus } from '@vitrina/core/types';
 import type { Ctx } from './store';
 import { now } from './env';
@@ -32,10 +32,10 @@ export interface UpsertOptions {
 }
 
 /**
- * Сохранить пост и создать или обновить карточку по его тексту.
+ * Сохранить пост и создать или обновить карточки по его тексту: обычно одну, у поста-прайса — по строке на товар.
  * Исходный текст пишется всегда — по нему можно перепарсить всё после улучшения разбора.
  */
-export async function upsertPost(ctx: Ctx, post: IncomingPost, opts: UpsertOptions = {}): Promise<UpsertResult | null> {
+export async function upsertPost(ctx: Ctx, post: IncomingPost, opts: UpsertOptions = {}): Promise<UpsertResult[]> {
   const { env, store } = ctx;
   const ts = now();
   const prev = await env.DB.prepare('SELECT text FROM posts WHERE store_id = ? AND msg_id = ?')
@@ -49,24 +49,57 @@ export async function upsertPost(ctx: Ctx, post: IncomingPost, opts: UpsertOptio
     .bind(store.id, post.msg_id, post.media_group_id, post.text, post.post_url, post.date || ts, ts)
     .run();
 
-  const existing = await env.DB.prepare('SELECT * FROM listings WHERE store_id = ? AND msg_id = ?')
+  const { results: existingRows } = await env.DB.prepare('SELECT * FROM listings WHERE store_id = ? AND msg_id = ? ORDER BY item')
     .bind(store.id, post.msg_id)
-    .first<ListingRow>();
-  if (existing && prev?.text === post.text && !opts.force) return null;
+    .all<ListingRow>();
+  if (existingRows.length && prev?.text === post.text && !opts.force) return [];
 
-  let p = parsePost(post.text, store.profile);
-  if (!p.parse_ok && p.status !== 'not_listing') p = await llmFallback(env, post.text, p, opts.llm ?? true);
+  let items = parseItems(post.text, store.profile);
+  // Gemini — только для обычного поста: строки прайса короткие и разбираются правилами
+  if (items.length === 1 && items[0].item === 0 && !items[0].parse_ok && items[0].status !== 'not_listing') {
+    items = [{ ...(await llmFallback(env, post.text, items[0], opts.llm ?? true)), item: 0 }];
+  }
+  // у продавца без отметок «продано» старое объявление само по себе устаревает
+  const { mode, staleDays } = store.profile;
+  const stale = mode === 'unless_sold' && staleDays > 0 && (post.date || ts) < ts - staleDays * 86400;
+
+  const out: UpsertResult[] = [];
+  for (const p of items) {
+    const existing = existingRows.find((r) => r.item === p.item);
+    const r = await upsertItem(ctx, post, p, existing, stale);
+    if (r) out.push(r);
+  }
+
+  // строк, которых больше нет в прайсе, нет и в наличии
+  for (const r of existingRows) {
+    if (!items.some((i) => i.item === r.item) && (r.status === 'active' || r.status === 'reserved')) await setStatus(ctx, r.id, 'sold');
+  }
+  // новый прайс заменяет старые: их товары, которых продавец больше не перечисляет, сняты
+  if (items.some((i) => i.item > 0)) {
+    await env.DB.prepare(
+      `UPDATE listings SET status = 'sold', sold_at = ?, updated_at = ? WHERE store_id = ? AND item > 0 AND msg_id < ? AND status IN ('active', 'reserved')`,
+    )
+      .bind(ts, ts, store.id, post.msg_id)
+      .run();
+  }
+  return out;
+}
+
+async function upsertItem(ctx: Ctx, post: IncomingPost, p: ParsedItem, existing: ListingRow | undefined, stale: boolean): Promise<UpsertResult | null> {
+  const { env, store } = ctx;
+  const ts = now();
+  const live = (p.status === 'active' || p.status === 'reserved') && !stale;
 
   if (!existing) {
-    // проданное и не-объявления без карточки — только в posts
-    if (p.status !== 'active' && p.status !== 'reserved') return null;
+    // проданное, устаревшее и не-объявления без карточки — только в posts
+    if (!live) return null;
     const row = await env.DB.prepare(
-      `INSERT INTO listings (store_id, msg_id, media_group_id, ${LISTING_COLS.join(', ')}, status, post_url, created_at, updated_at)
-       VALUES (?, ?, ?, ${LISTING_COLS.map(() => '?').join(', ')}, ?, ?, ?, ?)
-       ON CONFLICT (store_id, msg_id) DO UPDATE SET updated_at = excluded.updated_at
+      `INSERT INTO listings (store_id, msg_id, item, media_group_id, ${LISTING_COLS.join(', ')}, status, post_url, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ${LISTING_COLS.map(() => '?').join(', ')}, ?, ?, ?, ?)
+       ON CONFLICT (store_id, msg_id, item) DO UPDATE SET updated_at = excluded.updated_at
        RETURNING *`,
     )
-      .bind(store.id, post.msg_id, post.media_group_id, ...listingValues(p), p.status, post.post_url, post.date || ts, ts)
+      .bind(store.id, post.msg_id, p.item, post.media_group_id, ...listingValues(p), p.status, post.post_url, post.date || ts, ts)
       .first<ListingRow>();
     if (!row) return null;
     await attachGroupMedia(ctx, row);
@@ -75,10 +108,7 @@ export async function upsertPost(ctx: Ctx, post: IncomingPost, opts: UpsertOptio
 
   // Правка поста: «Продано» → sold, снова в наличии → active. Скрытые вручную остаются скрытыми.
   let status: ListingStatus = existing.status;
-  if (status !== 'hidden') {
-    if (p.status === 'sold' || p.status === 'not_listing') status = 'sold';
-    else status = p.status;
-  }
+  if (status !== 'hidden') status = live ? (p.status as ListingStatus) : 'sold';
   const becameSold = existing.status !== 'sold' && status === 'sold';
   const priceChanged = !!p.price && !!existing.price && p.price !== existing.price;
   if (priceChanged) {
@@ -94,6 +124,17 @@ export async function upsertPost(ctx: Ctx, post: IncomingPost, opts: UpsertOptio
     .bind(...(keep ? [] : listingValues(p)), status, ts, status, ts, status, existing.id)
     .first<ListingRow>();
   return row ? { listing: row, parsed: p, created: false, becameSold, priceChanged, oldPrice: existing.price } : null;
+}
+
+/** Объявления старше staleDays у продавцов без отметок «продано» — сняты; раз в час */
+export async function retireStale({ env, store }: Ctx) {
+  const { mode, staleDays } = store.profile;
+  if (mode !== 'unless_sold' || !staleDays) return { retired: 0 };
+  const ts = now();
+  const r = await env.DB.prepare(`UPDATE listings SET status = 'sold', sold_at = ?, updated_at = ? WHERE store_id = ? AND status = 'active' AND created_at < ?`)
+    .bind(ts, ts, store.id, ts - staleDays * 86400)
+    .run();
+  return { retired: r.meta.changes ?? 0 };
 }
 
 const LISTING_COLS = [
@@ -129,9 +170,10 @@ export async function reparse(ctx: Ctx, offset = 0, limit = 25) {
   let created = 0;
   let updated = 0;
   for (const post of results) {
-    const r = await upsertPost(ctx, post, { force: true, llm: false });
-    if (r?.created) created++;
-    else if (r) updated++;
+    for (const r of await upsertPost(ctx, post, { force: true, llm: false })) {
+      if (r.created) created++;
+      else updated++;
+    }
   }
   return { processed: results.length, created, updated, next: results.length === limit ? offset + limit : null };
 }

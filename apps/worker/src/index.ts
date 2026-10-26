@@ -14,8 +14,9 @@ import { handleMedia } from './media';
 import { createBot } from './bot';
 import { notifySubscribers, sendBuyRequest, sendQuestion, sendWeeklyStats } from './notify';
 import { checkDeleted, importChannel, importReviews, type ReviewsMeta } from './importer';
-import { downloadCovers, purgeSoldMedia, reparse, setStatus } from './ingest';
-import { listStores, resolveStore, saveStore, type Ctx, type Store } from './store';
+import { downloadCovers, purgeSoldMedia, reparse, retireStale, setStatus } from './ingest';
+import { getStore, listStores, resolveStore, saveStore, type Ctx, type Store } from './store';
+import { ingestFeed, purgeExpired, purgeStore, saveAvatar, type FeedPost } from './demo';
 
 type HonoEnv = { Bindings: Env; Variables: { user: TgUser | null; store: Store } };
 const app = new Hono<HonoEnv>();
@@ -238,6 +239,8 @@ app.put('/admin/store', async (c) => {
   const b = await c.req.json<{ config: StoreConfig; profile: Partial<ParseProfile>; kind?: 'client' | 'demo'; expires_at?: number | null }>();
   if (!b?.config?.slug || !b.config.channel) return c.json({ error: 'config.slug и config.channel обязательны' }, 400);
   if (c.env.STORE_ID && b.config.slug !== c.env.STORE_ID) return c.json({ error: `этот деплой обслуживает магазин ${c.env.STORE_ID}` }, 400);
+  const taken = await c.env.DB.prepare('SELECT id FROM stores WHERE channel = ? COLLATE NOCASE AND id != ?').bind(b.config.channel, b.config.slug).first<{ id: string }>();
+  if (taken) return c.json({ error: `канал @${b.config.channel} уже подключён к магазину ${taken.id}` }, 409);
   await saveStore(c.env, b);
   return c.json({ ok: true });
 });
@@ -250,6 +253,32 @@ const withStore = (fn: (ctx: Ctx, c: AdminCtx) => Promise<unknown>) => async (c:
   return c.json(await fn({ env: c.env, store }, c));
 };
 app.post('/admin/import', withStore((ctx, c) => importChannel(ctx, num(c.req.query('pages')) ?? 3)));
+app.post(
+  '/admin/ingest',
+  withStore(async (ctx, c) => {
+    const b = await c.req.json<{ posts: FeedPost[]; llm?: boolean }>();
+    return ingestFeed(ctx, (b.posts ?? []).slice(0, 40), b.llm ?? true);
+  }),
+);
+app.put(
+  '/admin/avatar',
+  withStore(async (ctx, c) => {
+    const avatar = await saveAvatar(ctx, await c.req.arrayBuffer(), c.req.header('content-type') ?? 'image/jpeg');
+    await saveStore(c.env, { config: { ...ctx.store.config, avatar }, profile: ctx.store.profile, kind: ctx.store.kind, expires_at: ctx.store.expires_at });
+    return { avatar };
+  }),
+);
+app.delete('/admin/store', async (c) => {
+  const id = c.req.query('store') ?? '';
+  if (c.env.STORE_ID) return c.json({ error: 'клиентский магазин так не удаляется' }, 400);
+  if (!(await getStore(c.env, id))) return c.json({ error: 'store not found' }, 404);
+  return c.json(await purgeStore(c.env, id));
+});
+app.get('/admin/stores', async (c) =>
+  c.json(
+    (await listStores(c.env)).map((s) => ({ id: s.id, channel: s.channel, name: s.config.name, kind: s.kind, expires_at: s.expires_at })),
+  ),
+);
 app.post('/admin/media', withStore((ctx) => downloadCovers(ctx, 12)));
 app.post('/admin/reviews', withStore((ctx) => importReviews(ctx)));
 app.post('/admin/check', withStore((ctx) => checkDeleted(ctx)));
@@ -267,12 +296,17 @@ async function hourly(env: Env) {
   for (const store of stores) {
     const ctx: Ctx = { env, store };
     const [checks, covers] = env.STORE_ID ? [15, 6] : [3, 2];
-    if (budget < checks + covers * 2) break;
-    budget -= checks + covers * 2;
+    // демо не получает посты от бота — раз в час подтягиваем первую страницу ленты
+    const feed = store.kind === 'demo' ? 1 : 0;
+    if (budget < checks + covers * 2 + feed) break;
+    budget -= checks + covers * 2 + feed;
+    if (feed) await importChannel(ctx, 1, covers);
+    else await downloadCovers(ctx, covers);
     await checkDeleted(ctx, checks);
-    await downloadCovers(ctx, covers);
+    await retireStale(ctx);
     await purgeSoldMedia(ctx);
   }
+  await purgeExpired(env);
   await env.DB.prepare('DELETE FROM events WHERE created_at < ?').bind(now() - 90 * 86400).run();
   await env.DB.prepare('DELETE FROM media WHERE listing_id IS NULL AND created_at < ?').bind(now() - 86400).run();
 }

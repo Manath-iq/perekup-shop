@@ -8,7 +8,7 @@ import type { ListingRow } from './db';
 import { addMedia, downloadCovers, setStatus, upsertPost } from './ingest';
 import { pickPhotoSizes } from './media';
 import { cardUrl, notifyPriceDrop, notifySubscribers, sendAdminPreview, statsText, storeUrl } from './notify';
-import { getStore, getStoreByChannel, type Ctx } from './store';
+import { getStore, getStoreByChannel, listStores, type Ctx } from './store';
 
 interface Deps {
   env: Env;
@@ -72,20 +72,24 @@ export function createBot({ env, origin, waitUntil }: Deps) {
     }
 
     if (text) {
-      const res = await upsertPost(ctx, {
+      const results = await upsertPost(ctx, {
         msg_id: msg.message_id, text, media_group_id: group,
         date: edited ? msg.date : msg.date || now(), post_url: postUrl(msg.chat, msg.message_id),
       });
-      if (res?.priceChanged && res.oldPrice) waitUntil(notifyPriceDrop(ctx, origin, res.listing, res.oldPrice));
-      if (res?.created) {
-        const listing = res.listing;
+      for (const res of results) if (res.priceChanged && res.oldPrice) waitUntil(notifyPriceDrop(ctx, origin, res.listing, res.oldPrice));
+      const created = results.filter((r) => r.created);
+      if (created.length) {
         waitUntil(
           (async () => {
             if (group) await sleep(ALBUM_SETTLE_MS);
             // обложку берём, когда альбом собрался, — иначе первым может оказаться не первое фото
             await downloadCovers(ctx, 1);
-            await sendAdminPreview(ctx, origin, listing, res.parsed.missing);
-            if (listing.parse_ok) await notifySubscribers(ctx, origin, listing);
+            // у прайса превью по первым трём строкам, чтобы не завалить продавца сообщениями
+            for (const res of created.slice(0, 3)) {
+              await sendAdminPreview(ctx, origin, res.listing, res.parsed.missing);
+              if (res.listing.parse_ok) await notifySubscribers(ctx, origin, res.listing);
+            }
+            for (const res of created.slice(3)) if (res.listing.parse_ok) await notifySubscribers(ctx, origin, res.listing);
           })(),
         );
       }
@@ -101,7 +105,10 @@ export function createBot({ env, origin, waitUntil }: Deps) {
     const own = await ownStore();
     const store = own?.store ?? (start.store ? await getStore(env, start.store) : null);
     if (!store) {
-      return tg.reply('Это Витрина — магазин для Telegram-каналов с техникой. Откройте ссылку на магазин, которую вам прислали.');
+      const hint = isAdmin(tg) && !env.STORE_ID ? '\n\nВы админ демо: /demos — список демо-магазинов.' : '';
+      return tg.reply(
+        `Это Витрина — магазин внутри Telegram для каналов с техникой: покупатель видит только то, что есть в наличии, и пишет продавцу в один тап.\n\nОткройте ссылку на магазин, которую вам прислали.${hint}`,
+      );
     }
     const ctx: Ctx = { env, store };
     if (start.listing) {
@@ -138,6 +145,18 @@ export function createBot({ env, origin, waitUntil }: Deps) {
       return `<code>${l.id}</code> ${listingTitle(l)} — ${l.price ? formatPrice(l.price) : '?'} · ${days} дн.${flags}`;
     });
     await tg.reply(`<b>В наличии: ${results.length}</b>\n\n${lines.join('\n')}\n\n⚠️ — ждёт «Всё верно»`, { parse_mode: 'HTML' });
+  });
+
+  // Демо-деплой: список магазинов со ссылками — чтобы быстро открыть или переслать перекупу
+  bot.command('demos', async (tg) => {
+    if (!isAdmin(tg) || env.STORE_ID) return;
+    const stores = (await listStores(env)).filter((s) => s.kind === 'demo');
+    if (!stores.length) return tg.reply('Демо пока нет. Создайте: npm run cli -- demo <канал>');
+    const lines = stores.map((s) => {
+      const days = s.expires_at ? Math.max(0, Math.ceil((s.expires_at - now()) / 86400)) : null;
+      return `<b>${s.config.name}</b> · @${s.channel}${days !== null ? ` · ещё ${days} дн.` : ''}\nhttps://t.me/${env.BOT_USERNAME}?start=${s.id}`;
+    });
+    await tg.reply(lines.join('\n\n'), { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
   });
 
   bot.command('stats', async (tg) => {
